@@ -1,8 +1,14 @@
+#![allow(dead_code)] // each test binary uses a different subset
+
 //! In-process SSH server for tests: password auth, `exec`, and direct-tcpip
 //! forwarding (so jump host chains can be tested without Docker).
 
+pub mod sftp;
+
 use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelId};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -13,13 +19,29 @@ pub struct TestServer {
     pub host_key_line: String,
 }
 
-#[derive(Clone)]
 struct Handler {
     label: String,
     user: String,
     password: String,
     forwards: Arc<AtomicUsize>,
     shells: Vec<ChannelId>,
+    sftp_root: Option<PathBuf>,
+    channels: HashMap<ChannelId, Channel<Msg>>,
+}
+
+/// Cloning yields a fresh per-connection handler with the same configuration.
+impl Clone for Handler {
+    fn clone(&self) -> Self {
+        Self {
+            label: self.label.clone(),
+            user: self.user.clone(),
+            password: self.password.clone(),
+            forwards: self.forwards.clone(),
+            shells: Vec::new(),
+            sftp_root: self.sftp_root.clone(),
+            channels: HashMap::new(),
+        }
+    }
 }
 
 impl server::Server for Handler {
@@ -42,11 +64,35 @@ impl server::Handler for Handler {
 
     async fn channel_open_session(
         &mut self,
-        _channel: Channel<Msg>,
+        channel: Channel<Msg>,
         reply: server::ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.channels.insert(channel.id(), channel);
         reply.accept().await;
+        Ok(())
+    }
+
+    async fn subsystem_request(
+        &mut self,
+        channel_id: ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        match (
+            name,
+            self.sftp_root.clone(),
+            self.channels.remove(&channel_id),
+        ) {
+            ("sftp", Some(root), Some(channel)) => {
+                session.channel_success(channel_id)?;
+                tokio::spawn(russh_sftp::server::run(
+                    channel.into_stream(),
+                    sftp::FsSftp::new(&root),
+                ));
+            }
+            _ => session.channel_failure(channel_id)?,
+        }
         Ok(())
     }
 
@@ -149,6 +195,16 @@ impl server::Handler for Handler {
 impl TestServer {
     /// Start a server that accepts exactly `user`/`password`.
     pub async fn start(label: &str, user: &str, password: &str) -> Self {
+        Self::start_with_sftp(label, user, password, None).await
+    }
+
+    /// Like [`start`](Self::start) but also serves SFTP rooted at `sftp_root`.
+    pub async fn start_with_sftp(
+        label: &str,
+        user: &str,
+        password: &str,
+        sftp_root: Option<PathBuf>,
+    ) -> Self {
         let key =
             russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
                 .expect("key");
@@ -168,6 +224,8 @@ impl TestServer {
             password: password.into(),
             forwards: forwards.clone(),
             shells: Vec::new(),
+            sftp_root,
+            channels: HashMap::new(),
         };
         tokio::spawn(async move {
             let _ = h.run_on_socket(config, &listener).await;

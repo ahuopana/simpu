@@ -298,6 +298,10 @@ impl Shell {
 }
 
 impl SshSession {
+    pub(crate) async fn open_channel(&self) -> Result<Channel<client::Msg>, russh::Error> {
+        self.handle.channel_open_session().await
+    }
+
     /// Open an interactive shell with a pseudo terminal of the given size.
     pub async fn open_shell(&self, cols: u32, rows: u32) -> Result<Shell, russh::Error> {
         let channel = self.handle.channel_open_session().await?;

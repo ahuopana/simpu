@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)] // test helpers
+
 mod common;
 
 use common::TestServer;

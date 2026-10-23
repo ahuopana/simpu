@@ -9,6 +9,7 @@ pub mod jump;
 pub mod model;
 pub mod platform;
 pub mod plugin;
+pub mod sftp;
 pub mod ssh;
 pub mod store;
 
