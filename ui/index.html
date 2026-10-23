@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Simpu</title>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <input id="search" data-testid="search" placeholder="Search connections…" />
+        <div id="tree" data-testid="tree"></div>
+      </aside>
+      <main id="main">
+        <div id="tabbar" data-testid="tabbar"></div>
+        <div id="toolbar">
+          <button id="split-row" data-testid="split-row" title="Split right">⇥ Split right</button>
+          <button id="split-col" data-testid="split-col" title="Split down">⤓ Split down</button>
+          <button id="close-pane" data-testid="close-pane" title="Close pane">✕ Close pane</button>
+        </div>
+        <div id="banner" data-testid="banner" hidden></div>
+        <div id="panes" data-testid="panes"></div>
+        <div id="toasts" data-testid="toasts"></div>
+      </main>
+    </div>
+    <div id="modal" data-testid="modal" hidden></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
