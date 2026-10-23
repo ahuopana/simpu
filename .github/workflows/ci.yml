@@ -57,6 +57,7 @@ jobs:
       - run: cargo test --workspace
       - name: Smoke test - app starts under Xvfb and stays up
         run: |
+          cargo build -p simpu-app
           set +e
           xvfb-run -a timeout 10 ./target/debug/simpu-app > app.log 2>&1
           code=$?
