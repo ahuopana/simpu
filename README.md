@@ -4,7 +4,8 @@ A Windows SSH client with a connection tree, tabbed and split sessions,
 drag-and-drop file transfer, jump hosts, and a plugin interface
 (first plugin: Bitwarden). Named after *simpukka*, Finnish for shell.
 
-**Status:** early development (pre-1.0). Not usable yet.
+**Status:** early development (pre-1.0). The core protocols, UI and Bitwarden
+plugin work in tests; there is no release yet.
 
 ## Features (planned for 1.0)
 

@@ -6,6 +6,7 @@ is hard to reverse.
 
 ## Layout
 - `crates/simpu-core`: platform-independent logic. No Windows APIs here.
+- `crates/simpu-app`: thin Tauri adapter; `ui/`: frontend; `plugins/`: plugin executables.
 - OS-specific code goes behind traits in `simpu-core::platform` (ADR 0004).
 - `docs/`: development guide and ADRs. README is for users only.
 
@@ -13,6 +14,8 @@ is hard to reverse.
 - `cargo test --workspace` : all unit and integration tests (Linux container is fine)
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo fmt --all --check`
+- `cd ui && npm test && npm run e2e` (set `PW_CHROMIUM` if the bundled Chromium differs)
+- UI changes: keep `ui/src/tauriBackend.ts` and `crates/simpu-app/src/lib.rs` in sync (contract test)
 
 ## Rules
 - Until 1.0, push directly to `main`, but only code whose tests pass locally.
