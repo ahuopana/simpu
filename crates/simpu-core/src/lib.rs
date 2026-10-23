@@ -6,6 +6,7 @@
 pub mod credentials;
 pub mod hostkeys;
 pub mod jump;
+pub mod manager;
 pub mod model;
 pub mod platform;
 pub mod plugin;
