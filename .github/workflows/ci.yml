@@ -58,9 +58,13 @@ jobs:
       - name: Smoke test - app starts under Xvfb and stays up
         run: |
           set +e
-          xvfb-run -a timeout 10 ./target/debug/simpu-app
+          xvfb-run -a timeout 10 ./target/debug/simpu-app > app.log 2>&1
           code=$?
-          [ "$code" = 124 ] || { echo "app exited early with $code"; exit 1; }
+          if [ "$code" != 124 ]; then
+            # Job logs are not always readable from outside; surface the tail as an annotation.
+            echo "::error title=app exited early ($code)::$(tail -n 15 app.log | tr '\n' '|')"
+            exit 1
+          fi
 
   windows:
     runs-on: windows-latest
