@@ -1,0 +1,17 @@
+[package]
+name = "simpu-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "In-process SSH/SFTP test server shared by Simpu's integration tests"
+
+[lints]
+workspace = true
+
+[dependencies]
+russh = "0.64"
+russh-sftp = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+rand = "0.10"

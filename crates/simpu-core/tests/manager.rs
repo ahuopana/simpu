@@ -1,11 +1,9 @@
 #![allow(clippy::unwrap_used)]
-mod common;
-
-use common::TestServer;
 use simpu_core::credentials::{Credentials, StaticProvider};
 use simpu_core::manager::{Events, Manager, PromptInfo, TransferInfo};
 use simpu_core::model::{SecretKind, SecretRef};
 use simpu_core::{Connection, Node, Protocol, Tree};
+use simpu_testkit::TestServer;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

@@ -1,8 +1,5 @@
 #![allow(clippy::unwrap_used)] // test helpers
 
-mod common;
-
-use common::TestServer;
 use simpu_core::credentials::{Credentials, Secret, StaticProvider};
 use simpu_core::hostkeys::KnownHosts;
 use simpu_core::model::{SecretKind, SecretRef};
@@ -10,6 +7,7 @@ use simpu_core::ssh::{
     always_trust, never_trust, plan_hops, ErrorKind, Hop, HopAuth, ShellEvent, SshSession,
 };
 use simpu_core::{Connection, Node, Protocol, Tree};
+use simpu_testkit::TestServer;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 

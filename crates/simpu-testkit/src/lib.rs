@@ -1,5 +1,3 @@
-#![allow(dead_code)] // each test binary uses a different subset
-
 //! In-process SSH server for tests: password auth, `exec`, and direct-tcpip
 //! forwarding (so jump host chains can be tested without Docker).
 

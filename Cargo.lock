@@ -3941,6 +3941,7 @@ dependencies = [
  "serde",
  "serde_json",
  "simpu-plugin-api",
+ "simpu-testkit",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -3964,6 +3965,19 @@ dependencies = [
  "serde_json",
  "simpu-core",
  "simpu-plugin-api",
+ "simpu-testkit",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "simpu-testkit"
+version = "0.1.0"
+dependencies = [
+ "rand",
+ "russh",
+ "russh-sftp",
+ "tokio",
 ]
 
 [[package]]

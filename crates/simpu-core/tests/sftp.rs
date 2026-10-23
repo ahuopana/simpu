@@ -1,12 +1,10 @@
 #![allow(clippy::unwrap_used)] // test helpers
 
-mod common;
-
-use common::TestServer;
 use simpu_core::credentials::Secret;
 use simpu_core::hostkeys::KnownHosts;
 use simpu_core::sftp::{Progress, SftpError};
 use simpu_core::ssh::{always_trust, Hop, HopAuth, SshSession};
+use simpu_testkit::TestServer;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 

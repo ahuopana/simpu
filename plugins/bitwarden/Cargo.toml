@@ -23,3 +23,6 @@ serde_json = "1"
 
 [dev-dependencies]
 simpu-core = { path = "../../crates/simpu-core" }
+simpu-testkit = { path = "../../crates/simpu-testkit" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tempfile = "3"
