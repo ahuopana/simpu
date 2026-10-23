@@ -448,8 +448,13 @@ backend.onCredentialPrompt((p) => {
   const m = $("modal");
   m.hidden = false;
   m.innerHTML = `<form class="box" data-testid="password-dialog">
-    <h3>Password required</h3>
-    <div>${esc(p.username)}@${esc(p.host)} (${esc(p.hop)})</div>
+    <h3>${p.kind === "unlock" ? `Unlock ${esc(p.provider ?? "vault")}` : "Password required"}</h3>
+    <div>${
+      p.kind === "unlock"
+        ? `Master password needed to read credentials for ${esc(p.hop)}.`
+        : `${esc(p.username)}@${esc(p.host)} (${esc(p.hop)})`
+    }</div>
+    ${p.error ? `<div class="err" data-testid="password-error">${esc(p.error)}</div>` : ""}
     <input type="password" name="pw" data-testid="password-input" autocomplete="off" style="margin:8px 0;width:100%" />
     <button type="submit" data-testid="password-ok">Connect</button>
     <button type="button" data-testid="password-cancel">Cancel</button></form>`;

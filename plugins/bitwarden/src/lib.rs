@@ -1,8 +1,9 @@
 //! Bitwarden credential provider. Talks to the official `bw` CLI.
 //!
-//! - Session: `BW_SESSION` must be set in the environment (the user runs
-//!   `bw unlock` and Simpu passes the token on; the master password is never
-//!   handled by this plugin).
+//! - Session: either `BW_SESSION` is inherited from the environment, or the
+//!   host sends `vault.unlock` with the master password, which is passed to
+//!   `bw unlock` through an environment variable and never stored. Only the
+//!   resulting session token is kept in memory.
 //! - `password` secrets: `bw get password <item>`.
 //! - `keyfile` secrets: private key stored in the item's notes:
 //!   `bw get notes <item>`.
@@ -13,7 +14,10 @@ use std::process::Command;
 
 /// Runs `bw` with arguments; returns stdout on success or stderr on failure.
 pub trait BwRunner {
-    fn run(&self, args: &[&str]) -> Result<String, String>;
+    /// `session` is the `BW_SESSION` token to use, if any.
+    fn run(&self, args: &[&str], session: Option<&str>) -> Result<String, String>;
+    /// `bw unlock --raw` with the master password; returns the session token.
+    fn unlock(&self, password: &str) -> Result<String, String>;
 }
 
 pub struct CliRunner {
@@ -28,31 +32,67 @@ impl CliRunner {
     }
 }
 
+fn finish(out: std::process::Output) -> Result<String, String> {
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches(['\r', '\n'])
+            .to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
 impl BwRunner for CliRunner {
-    fn run(&self, args: &[&str]) -> Result<String, String> {
+    fn run(&self, args: &[&str], session: Option<&str>) -> Result<String, String> {
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(args);
+        if let Some(s) = session {
+            cmd.env("BW_SESSION", s);
+        }
+        finish(
+            cmd.output()
+                .map_err(|e| format!("cannot run {}: {e}", self.bin))?,
+        )
+    }
+
+    fn unlock(&self, password: &str) -> Result<String, String> {
+        // The master password goes through the environment, never the command line.
         let out = Command::new(&self.bin)
-            .args(args)
+            .args(["unlock", "--passwordenv", "SIMPU_BW_PASSWORD", "--raw"])
+            .env("SIMPU_BW_PASSWORD", password)
             .output()
             .map_err(|e| format!("cannot run {}: {e}", self.bin))?;
-        if out.status.success() {
-            Ok(String::from_utf8_lossy(&out.stdout)
-                .trim_end_matches(['\r', '\n'])
-                .to_string())
-        } else {
-            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-        }
+        finish(out)
     }
 }
 
 pub struct Bitwarden<R: BwRunner> {
     pub runner: R,
+    /// Session token from `bw unlock`, or the inherited `BW_SESSION`.
+    session: std::sync::Mutex<Option<String>>,
 }
 
 impl<R: BwRunner> Bitwarden<R> {
+    pub fn new(runner: R) -> Self {
+        Self {
+            runner,
+            session: std::sync::Mutex::new(
+                std::env::var("BW_SESSION").ok().filter(|s| !s.is_empty()),
+            ),
+        }
+    }
+
+    fn session(&self) -> Option<String> {
+        self.session
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
     fn is_unlocked(&self) -> Result<bool, RpcError> {
         let status = self
             .runner
-            .run(&["status"])
+            .run(&["status"], self.session().as_deref())
             .map_err(|e| RpcError::new(ERR_OTHER, e))?;
         Ok(status.contains("\"status\":\"unlocked\""))
     }
@@ -65,7 +105,7 @@ impl<R: BwRunner> Plugin for Bitwarden<R> {
             name: "Bitwarden".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             protocol: PROTOCOL_VERSION,
-            capabilities: vec!["credentials".into()],
+            capabilities: vec!["credentials".into(), "unlock".into()],
         }
     }
 
@@ -83,7 +123,10 @@ impl<R: BwRunner> Plugin for Bitwarden<R> {
                 ))
             }
         };
-        match self.runner.run(&["get", field, &p.item]) {
+        match self
+            .runner
+            .run(&["get", field, &p.item], self.session().as_deref())
+        {
             Ok(s) if s.is_empty() => Err(RpcError::new(
                 ERR_NOT_FOUND,
                 format!("item {} has no {field}", p.item),
@@ -93,6 +136,20 @@ impl<R: BwRunner> Plugin for Bitwarden<R> {
                 ERR_NOT_FOUND,
                 format!("item {} not found", p.item),
             )),
+            Err(e) => Err(RpcError::new(ERR_OTHER, e)),
+        }
+    }
+
+    fn unlock(&self, password: &str) -> Result<(), RpcError> {
+        match self.runner.unlock(password) {
+            Ok(token) if !token.is_empty() => {
+                *self.session.lock().unwrap_or_else(|p| p.into_inner()) = Some(token);
+                Ok(())
+            }
+            Ok(_) => Err(RpcError::new(ERR_OTHER, "bw returned no session token")),
+            Err(e) if e.to_lowercase().contains("invalid master password") => {
+                Err(RpcError::new(ERR_BAD_PASSWORD, "Invalid master password"))
+            }
             Err(e) => Err(RpcError::new(ERR_OTHER, e)),
         }
     }
@@ -108,7 +165,14 @@ mod tests {
         calls: RefCell<Vec<String>>,
     }
     impl BwRunner for Fake {
-        fn run(&self, args: &[&str]) -> Result<String, String> {
+        fn unlock(&self, password: &str) -> Result<String, String> {
+            if password == "master" {
+                Ok("tok".into())
+            } else {
+                Err("Invalid master password.".into())
+            }
+        }
+        fn run(&self, args: &[&str], _session: Option<&str>) -> Result<String, String> {
             self.calls.borrow_mut().push(args.join(" "));
             match args {
                 ["status"] => Ok(format!("{{\"status\":\"{}\"}}", self.status)),
@@ -121,12 +185,10 @@ mod tests {
     }
 
     fn bw(status: &'static str) -> Bitwarden<Fake> {
-        Bitwarden {
-            runner: Fake {
-                status,
-                calls: RefCell::new(vec![]),
-            },
-        }
+        Bitwarden::new(Fake {
+            status,
+            calls: RefCell::new(vec![]),
+        })
     }
     fn get(item: &str, kind: &str) -> GetParams {
         GetParams {
@@ -173,5 +235,14 @@ mod tests {
             b.credential_get(get("pw1", "totp")).unwrap_err().code,
             ERR_INVALID_PARAMS
         );
+    }
+
+    #[test]
+    fn unlock_success_and_wrong_password() {
+        let b = bw("locked");
+        assert_eq!(b.unlock("nope").unwrap_err().code, ERR_BAD_PASSWORD);
+        assert!(b.session().is_none());
+        b.unlock("master").unwrap();
+        assert_eq!(b.session().as_deref(), Some("tok"));
     }
 }

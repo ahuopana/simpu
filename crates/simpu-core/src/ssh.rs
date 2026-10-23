@@ -40,6 +40,7 @@ pub enum PlanError {
     #[error("credentials for {hop}: {source}")]
     Credential {
         hop: String,
+        provider: String,
         source: CredentialError,
     },
 }
@@ -57,6 +58,7 @@ pub fn plan_hops(
                 Some(r) => {
                     let secret = creds.resolve(r).map_err(|source| PlanError::Credential {
                         hop: c.name.clone(),
+                        provider: r.provider.clone(),
                         source,
                     })?;
                     match r.kind {

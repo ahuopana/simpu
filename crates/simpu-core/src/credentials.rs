@@ -33,6 +33,10 @@ pub enum CredentialError {
     NotFound(String),
     #[error("provider {0} not available")]
     NoProvider(String),
+    #[error("wrong master password")]
+    BadPassword,
+    #[error("provider {0} cannot be unlocked")]
+    UnlockUnsupported(String),
     #[error("provider error: {0}")]
     Other(String),
 }
@@ -40,6 +44,10 @@ pub enum CredentialError {
 pub trait CredentialProvider: Send + Sync {
     fn id(&self) -> &str;
     fn get(&self, item: &str, kind: SecretKind) -> Result<Secret, CredentialError>;
+    /// Unlock the provider's vault with the master password.
+    fn unlock(&self, _password: &Secret) -> Result<(), CredentialError> {
+        Err(CredentialError::UnlockUnsupported(self.id().to_string()))
+    }
 }
 
 /// Routes [`SecretRef`]s to registered providers.
@@ -51,6 +59,13 @@ pub struct Credentials {
 impl Credentials {
     pub fn register(&mut self, p: Box<dyn CredentialProvider>) {
         self.providers.insert(p.id().to_string(), p);
+    }
+
+    pub fn unlock(&self, provider: &str, password: &Secret) -> Result<(), CredentialError> {
+        self.providers
+            .get(provider)
+            .ok_or_else(|| CredentialError::NoProvider(provider.to_string()))?
+            .unlock(password)
     }
 
     pub fn resolve(&self, r: &SecretRef) -> Result<Secret, CredentialError> {

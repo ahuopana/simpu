@@ -37,6 +37,10 @@ export interface HostKeyPrompt {
 
 export interface CredentialPrompt {
   promptId: string;
+  /** "password" for an SSH hop, "unlock" for a vault master password. */
+  kind: "password" | "unlock";
+  provider?: string | null;
+  error?: string | null;
   hop: string;
   username: string;
   host: string;

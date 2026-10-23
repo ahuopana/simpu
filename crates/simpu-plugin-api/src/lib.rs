@@ -5,6 +5,7 @@
 //! Methods:
 //! - `initialize` -> [`Info`]
 //! - `credential.get` with [`GetParams`] -> [`GetResult`]
+//! - `vault.unlock` with [`UnlockParams`] -> `{}` (optional; capability `unlock`)
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,10 +14,12 @@ use std::io::{BufRead, Write};
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const METHOD_INITIALIZE: &str = "initialize";
 pub const METHOD_CREDENTIAL_GET: &str = "credential.get";
+pub const METHOD_VAULT_UNLOCK: &str = "vault.unlock";
 
 pub const ERR_METHOD_NOT_FOUND: i64 = -32601;
 pub const ERR_INVALID_PARAMS: i64 = -32602;
 pub const ERR_LOCKED: i64 = -32001;
+pub const ERR_BAD_PASSWORD: i64 = -32003;
 pub const ERR_NOT_FOUND: i64 = -32002;
 pub const ERR_OTHER: i64 = -32000;
 
@@ -87,10 +90,19 @@ pub struct GetResult {
     pub secret: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnlockParams {
+    pub password: String,
+}
+
 /// Implemented by each plugin.
 pub trait Plugin {
     fn info(&self) -> Info;
     fn credential_get(&self, params: GetParams) -> Result<GetResult, RpcError>;
+    /// Unlock the vault with the master password. Plugins without a vault keep the default.
+    fn unlock(&self, _password: &str) -> Result<(), RpcError> {
+        Err(RpcError::new(ERR_METHOD_NOT_FOUND, "unlock not supported"))
+    }
 }
 
 fn handle(plugin: &dyn Plugin, req: Request) -> Response {
@@ -104,6 +116,10 @@ fn handle(plugin: &dyn Plugin, req: Request) -> Response {
             .and_then(|r| {
                 serde_json::to_value(r).map_err(|e| RpcError::new(ERR_OTHER, e.to_string()))
             }),
+        METHOD_VAULT_UNLOCK => serde_json::from_value::<UnlockParams>(req.params)
+            .map_err(|e| RpcError::new(ERR_INVALID_PARAMS, e.to_string()))
+            .and_then(|p| plugin.unlock(&p.password))
+            .map(|()| serde_json::json!({})),
         other => Err(RpcError::new(
             ERR_METHOD_NOT_FOUND,
             format!("unknown method {other}"),

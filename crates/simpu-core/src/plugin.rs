@@ -123,6 +123,32 @@ impl CredentialProvider for PluginProvider {
                 .map_err(other)?;
         Ok(Secret::new(r.secret))
     }
+
+    fn unlock(&self, password: &Secret) -> Result<(), CredentialError> {
+        self.unlock_impl(password)
+    }
+}
+
+impl PluginProvider {
+    fn unlock_impl(&self, password: &Secret) -> Result<(), CredentialError> {
+        let params = serde_json::to_value(UnlockParams {
+            password: password.expose().to_string(),
+        })
+        .map_err(other)?;
+        let resp = self
+            .io
+            .lock()
+            .map_err(|_| other("plugin lock poisoned"))?
+            .call(METHOD_VAULT_UNLOCK, params)?;
+        match resp.error {
+            None => Ok(()),
+            Some(e) if e.code == ERR_BAD_PASSWORD => Err(CredentialError::BadPassword),
+            Some(e) if e.code == ERR_METHOD_NOT_FOUND => {
+                Err(CredentialError::UnlockUnsupported(self.info.id.clone()))
+            }
+            Some(e) => Err(CredentialError::Other(e.message)),
+        }
+    }
 }
 
 impl Drop for PluginProvider {

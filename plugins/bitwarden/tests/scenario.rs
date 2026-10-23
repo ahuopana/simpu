@@ -17,6 +17,7 @@ use std::time::Duration;
 struct Fake {
     data: Mutex<String>,
     prompts: Mutex<Vec<PromptInfo>>,
+    unlocks: Mutex<Vec<CredentialPromptInfo>>,
 }
 
 impl Events for Fake {
@@ -30,7 +31,9 @@ impl Events for Fake {
     fn host_key_prompt(&self, p: PromptInfo) {
         self.prompts.lock().expect("lock").push(p);
     }
-    fn credential_prompt(&self, _: CredentialPromptInfo) {}
+    fn credential_prompt(&self, p: CredentialPromptInfo) {
+        self.unlocks.lock().expect("lock").push(p);
+    }
     fn progress(&self, _: TransferInfo) {}
 }
 
@@ -48,6 +51,7 @@ fn credentials(status: &str) -> Credentials {
         &[
             ("BW_BIN", env!("CARGO_BIN_EXE_fake-bw")),
             ("FAKE_BW_STATUS", status),
+            ("FAKE_BW_PASSWORD", "master"),
             ("FAKE_BW_ITEMS", "jump-item=jump-pw;target-item=target-pw"),
         ],
     )
@@ -132,14 +136,75 @@ async fn jump_host_with_bitwarden_passwords() {
     );
 }
 
+/// Answer the next `n` unlock prompts with the given master passwords (None = cancel).
+fn answer_unlocks(
+    mgr: &Arc<Manager<Fake>>,
+    events: &Arc<Fake>,
+    answers: Vec<Option<&'static str>>,
+) -> tokio::task::JoinHandle<Vec<Option<String>>> {
+    let (m, e) = (mgr.clone(), events.clone());
+    tokio::spawn(async move {
+        let mut errors = Vec::new();
+        for a in answers {
+            let p = loop {
+                let next = {
+                    let mut g = e.unlocks.lock().expect("lock");
+                    (!g.is_empty()).then(|| g.remove(0))
+                };
+                if let Some(p) = next {
+                    break p;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            assert_eq!(
+                (p.kind.as_str(), p.provider.as_deref()),
+                ("unlock", Some("bitwarden"))
+            );
+            errors.push(p.error.clone());
+            m.answer_credential(&p.prompt_id, a.map(String::from));
+        }
+        errors
+    })
+}
+
 #[tokio::test]
-async fn locked_vault_fails_before_any_network_traffic() {
+async fn cancelling_the_unlock_prompt_fails_before_any_network_traffic() {
     let (mgr, events, target, jump, _dir) = setup("locked").await;
+    let answers = answer_unlocks(&mgr, &events, vec![None]);
     let err = mgr
         .open("s1", &target.id.to_string(), 80, 24)
         .await
         .expect_err("must fail");
+    answers.await.expect("answers");
     assert!(err.to_lowercase().contains("locked"), "{err}");
     assert!(events.prompts.lock().expect("lock").is_empty());
     assert_eq!(jump.forwards.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn locked_vault_is_unlocked_in_app_after_a_wrong_master_password() {
+    let (mgr, events, target, jump, _dir) = setup("locked").await;
+    let answers = answer_unlocks(&mgr, &events, vec![Some("wrong"), Some("master")]);
+    let (m, e) = (mgr.clone(), events.clone());
+    let hostkeys = tokio::spawn(async move {
+        let mut n = 0;
+        while n < 2 {
+            let next = e.prompts.lock().expect("lock").pop();
+            match next {
+                Some(p) => {
+                    m.answer_host_key(&p.prompt_id, true);
+                    n += 1;
+                }
+                None => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    });
+    mgr.open("s1", &target.id.to_string(), 80, 24)
+        .await
+        .expect("open after unlock");
+    hostkeys.await.expect("hostkeys");
+    let errors = answers.await.expect("answers");
+    assert_eq!(errors, [None, Some("Wrong master password".to_string())]);
+    wait(|| events.data.lock().expect("lock").contains("pty 80x24")).await;
+    assert_eq!(jump.forwards.load(Ordering::SeqCst), 1);
 }

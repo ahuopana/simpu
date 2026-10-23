@@ -7,6 +7,14 @@ const type = async (page: Page, text: string) => {
 };
 const open = async (page: Page, name: string, trust = true) => {
   await page.getByTestId(`conn-${name}`).dblclick();
+  // the (mock) Bitwarden vault starts locked; unlock it the first time it is needed
+  const dialog = page.getByTestId("password-dialog");
+  if (await dialog.waitFor({ timeout: 400 }).then(() => true, () => false)) {
+    if ((await dialog.textContent())?.includes("Unlock")) {
+      await page.getByTestId("password-input").fill("master");
+      await page.getByTestId("password-ok").click();
+    }
+  }
   if (trust) {
     await page.getByTestId("hostkey-trust").click();
   }
@@ -34,6 +42,8 @@ test("open session after trusting host key; type and see output", async ({ page 
 
 test("rejecting the host key shows a failure in the terminal", async ({ page }) => {
   await page.getByTestId("conn-db").dblclick();
+  await page.getByTestId("password-input").fill("master");
+  await page.getByTestId("password-ok").click();
   await page.getByTestId("hostkey-reject").click();
   await expect.poll(() => screen(page)).toContain("Connection failed");
 });
@@ -160,11 +170,21 @@ test.describe("ad-hoc password", () => {
     await expect.poll(() => screen(page)).toContain("password entry cancelled");
   });
 
-  test("vault-backed connections never prompt", async ({ page }) => {
+  test("vault-backed connections ask for the master password only, once", async ({ page }) => {
     await page.getByTestId("conn-db").dblclick();
-    await expect(page.getByTestId("password-dialog")).toHaveCount(0);
+    await expect(page.getByTestId("password-dialog")).toContainText("Unlock bitwarden");
+    await page.getByTestId("password-input").fill("nope");
+    await page.getByTestId("password-ok").click();
+    await expect(page.getByTestId("password-error")).toContainText("Wrong master password");
+    await page.getByTestId("password-input").fill("master");
+    await page.getByTestId("password-ok").click();
     await page.getByTestId("hostkey-trust").click();
     await expect.poll(() => screen(page)).toContain("Connected");
+    // unlocked now: a second vault-backed connection does not ask again
+    await page.getByTestId("conn-bastion").dblclick();
+    await page.getByTestId("hostkey-trust").click();
+    await expect(page.getByTestId("password-dialog")).toHaveCount(0);
+    await expect(page.getByTestId("tab-bastion")).toBeVisible();
   });
 });
 

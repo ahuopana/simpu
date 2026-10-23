@@ -2,11 +2,13 @@
 //! of the GUI toolkit. The app shell implements [`Events`]; tests use a fake.
 
 use crate::credentials::Credentials;
-use crate::credentials::Secret;
+use crate::credentials::{CredentialError, Secret};
 use crate::hostkeys::KnownHosts;
 use crate::model::{Folder, Node, Protocol, Tree};
 use crate::sftp::{Progress, Sftp};
-use crate::ssh::{plan_hops, HopAuth, HostKeyPolicy, HostKeyPrompt, Shell, ShellEvent, SshSession};
+use crate::ssh::{
+    plan_hops, HopAuth, HostKeyPolicy, HostKeyPrompt, PlanError, Shell, ShellEvent, SshSession,
+};
 use crate::telnet::{TelnetEvent, TelnetSession, TelnetWriter};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -39,6 +41,12 @@ pub struct PromptInfo {
 #[serde(rename_all = "camelCase")]
 pub struct CredentialPromptInfo {
     pub prompt_id: String,
+    /// `password` (for an SSH hop) or `unlock` (vault master password).
+    pub kind: String,
+    /// Set for `unlock`: which provider is being unlocked.
+    pub provider: Option<String>,
+    /// Set when a previous attempt failed (e.g. wrong master password).
+    pub error: Option<String>,
     pub hop: String,
     pub username: String,
     pub host: String,
@@ -156,20 +164,77 @@ impl<E: Events> Manager<E> {
         }
     }
 
-    async fn ask_password(&self, hop: &crate::ssh::Hop) -> Result<Secret, String> {
+    async fn ask(&self, mut info: CredentialPromptInfo) -> Option<Secret> {
         let (tx, rx) = oneshot::channel();
-        let prompt_id = Uuid::new_v4().to_string();
-        lock(&self.secret_prompts).insert(prompt_id.clone(), tx);
-        self.events.credential_prompt(CredentialPromptInfo {
-            prompt_id,
+        info.prompt_id = Uuid::new_v4().to_string();
+        lock(&self.secret_prompts).insert(info.prompt_id.clone(), tx);
+        self.events.credential_prompt(info);
+        rx.await.ok().flatten().map(Secret::new)
+    }
+
+    async fn ask_password(&self, hop: &crate::ssh::Hop) -> Result<Secret, String> {
+        let info = CredentialPromptInfo {
+            prompt_id: String::new(),
+            kind: "password".into(),
+            provider: None,
+            error: None,
             hop: hop.name.clone(),
             username: hop.username.clone(),
             host: hop.host.clone(),
-        });
-        match rx.await {
-            Ok(Some(p)) => Ok(Secret::new(p)),
-            _ => Err(format!("{}: password entry cancelled", hop.name)),
+        };
+        self.ask(info)
+            .await
+            .ok_or_else(|| format!("{}: password entry cancelled", hop.name))
+    }
+
+    /// Plan hops, unlocking a locked vault by asking for the master password (3 tries).
+    async fn plan_with_unlock(
+        &self,
+        tree: &Tree,
+        conn: &crate::model::Connection,
+    ) -> Result<Vec<crate::ssh::Hop>, String> {
+        let mut error = None;
+        for _ in 0..4 {
+            let (t, c, creds) = (tree.clone(), conn.clone(), self.creds.clone());
+            let planned = tokio::task::spawn_blocking(move || plan_hops(&t, &c, &creds))
+                .await
+                .map_err(|e| e.to_string())?;
+            let (hop, provider) = match planned {
+                Ok(h) => return Ok(h),
+                Err(PlanError::Credential {
+                    hop,
+                    provider,
+                    source: CredentialError::Locked,
+                }) => (hop, provider),
+                Err(e) => return Err(e.to_string()),
+            };
+            let info = CredentialPromptInfo {
+                prompt_id: String::new(),
+                kind: "unlock".into(),
+                provider: Some(provider.clone()),
+                error: error.take(),
+                hop,
+                username: String::new(),
+                host: String::new(),
+            };
+            let pw = self
+                .ask(info)
+                .await
+                .ok_or_else(|| format!("{provider} is locked (unlock cancelled)"))?;
+            let creds = self.creds.clone();
+            let p = provider.clone();
+            match tokio::task::spawn_blocking(move || creds.unlock(&p, &pw))
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                Ok(()) => {}
+                Err(CredentialError::BadPassword) => {
+                    error = Some("Wrong master password".to_string())
+                }
+                Err(e) => return Err(e.to_string()),
+            }
         }
+        Err("too many failed unlock attempts".into())
     }
 
     fn policy(&self) -> HostKeyPolicy {
@@ -242,11 +307,7 @@ impl<E: Events> Manager<E> {
         }
 
         // SSH, SFTP and SCP all ride on an SSH session (SCP is served via SFTP).
-        let creds = self.creds.clone();
-        let hops = tokio::task::spawn_blocking(move || plan_hops(&tree, &conn, &creds))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
+        let hops = self.plan_with_unlock(&tree, &conn).await?;
         let mut hops = hops;
         for hop in &mut hops {
             if matches!(hop.auth, HopAuth::None) {
