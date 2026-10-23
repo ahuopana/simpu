@@ -35,6 +35,13 @@ export interface HostKeyPrompt {
   key: string;
 }
 
+export interface CredentialPrompt {
+  promptId: string;
+  hop: string;
+  username: string;
+  host: string;
+}
+
 export interface TransferProgress {
   transferId: string;
   done: number;
@@ -59,6 +66,10 @@ export interface Backend {
 
   onHostKeyPrompt(cb: (p: HostKeyPrompt) => void): Unlisten;
   answerHostKey(promptId: string, trust: boolean): Promise<void>;
+
+  onCredentialPrompt(cb: (p: CredentialPrompt) => void): Unlisten;
+  /** `null` cancels the connection attempt. */
+  answerCredential(promptId: string, secret: string | null): Promise<void>;
 
   sftpList(sessionId: string, path: string): Promise<RemoteEntry[]>;
   upload(sessionId: string, localPath: string, remoteDir: string): Promise<string>;

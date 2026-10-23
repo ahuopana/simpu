@@ -142,3 +142,28 @@ test.describe("connection editor", () => {
     await expect(page.getByTestId("tree")).toContainText("staging");
   });
 });
+
+test.describe("ad-hoc password", () => {
+  test("prompts when no vault secret is configured and uses the entered password", async ({ page }) => {
+    await page.getByTestId("conn-adhoc").dblclick();
+    await expect(page.getByTestId("password-dialog")).toContainText("me@adhoc.example.com");
+    await page.getByTestId("password-input").fill("s3cret");
+    await page.getByTestId("password-ok").click();
+    await page.getByTestId("hostkey-trust").click();
+    await expect.poll(() => screen(page)).toContain("Connected to me@adhoc.example.com");
+    expect(await page.evaluate(() => (window as any).__simpu.backend.enteredPasswords)).toEqual(["s3cret"]);
+  });
+
+  test("cancel aborts the connection", async ({ page }) => {
+    await page.getByTestId("conn-adhoc").dblclick();
+    await page.getByTestId("password-cancel").click();
+    await expect.poll(() => screen(page)).toContain("password entry cancelled");
+  });
+
+  test("vault-backed connections never prompt", async ({ page }) => {
+    await page.getByTestId("conn-db").dblclick();
+    await expect(page.getByTestId("password-dialog")).toHaveCount(0);
+    await page.getByTestId("hostkey-trust").click();
+    await expect.poll(() => screen(page)).toContain("Connected");
+  });
+});

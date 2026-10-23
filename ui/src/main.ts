@@ -444,6 +444,29 @@ backend.onHostKeyPrompt((p) => {
   m.querySelector('[data-testid="hostkey-reject"]')!.addEventListener("click", () => answer(false));
 });
 
+backend.onCredentialPrompt((p) => {
+  const m = $("modal");
+  m.hidden = false;
+  m.innerHTML = `<form class="box" data-testid="password-dialog">
+    <h3>Password required</h3>
+    <div>${esc(p.username)}@${esc(p.host)} (${esc(p.hop)})</div>
+    <input type="password" name="pw" data-testid="password-input" autocomplete="off" style="margin:8px 0;width:100%" />
+    <button type="submit" data-testid="password-ok">Connect</button>
+    <button type="button" data-testid="password-cancel">Cancel</button></form>`;
+  const form = m.querySelector("form")!;
+  const done = (secret: string | null) => {
+    m.hidden = true;
+    m.replaceChildren();
+    void backend.answerCredential(p.promptId, secret);
+  };
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    done((form.elements.namedItem("pw") as HTMLInputElement).value);
+  });
+  m.querySelector('[data-testid="password-cancel"]')!.addEventListener("click", () => done(null));
+  (form.elements.namedItem("pw") as HTMLInputElement).focus();
+});
+
 // ---------- boot ----------
 $("split-row").addEventListener("click", () => split("row"));
 $("split-col").addEventListener("click", () => split("col"));

@@ -1,7 +1,7 @@
 // Real backend: forwards to the Rust commands in crates/simpu-app.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Backend, HostKeyPrompt, TransferProgress, Unlisten } from "./api";
+import type { Backend, CredentialPrompt, HostKeyPrompt, TransferProgress, Unlisten } from "./api";
 
 function sub<T>(event: string, cb: (p: T) => void): Unlisten {
   let un: (() => void) | undefined;
@@ -24,6 +24,8 @@ export const tauriBackend: Backend = {
   onClosed: (sessionId, cb) => sub<string>(`session-closed-${sessionId}`, cb),
   onHostKeyPrompt: (cb) => sub<HostKeyPrompt>("hostkey-prompt", cb),
   answerHostKey: (promptId, trust) => invoke("hostkey_answer", { promptId, trust }),
+  onCredentialPrompt: (cb) => sub<CredentialPrompt>("credential-prompt", cb),
+  answerCredential: (promptId, secret) => invoke("credential_answer", { promptId, secret }),
   sftpList: (sessionId, path) => invoke("sftp_list", { sessionId, path }),
   upload: (sessionId, localPath, remoteDir) => invoke("sftp_upload", { sessionId, localPath, remoteDir }),
   download: (sessionId, remotePath, localDir) => invoke("sftp_download", { sessionId, remotePath, localDir }),

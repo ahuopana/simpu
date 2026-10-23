@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 use simpu_core::credentials::{Credentials, StaticProvider};
-use simpu_core::manager::{Events, Manager, PromptInfo, TransferInfo};
+use simpu_core::manager::{CredentialPromptInfo, Events, Manager, PromptInfo, TransferInfo};
 use simpu_core::model::{SecretKind, SecretRef};
 use simpu_core::{Connection, Node, Protocol, Tree};
 use simpu_testkit::TestServer;
@@ -13,6 +13,7 @@ struct Fake {
     closed: Mutex<Vec<String>>,
     prompts: Mutex<Vec<PromptInfo>>,
     progress: Mutex<Vec<TransferInfo>>,
+    cred_prompts: Mutex<Vec<CredentialPromptInfo>>,
 }
 
 impl Events for Fake {
@@ -27,6 +28,9 @@ impl Events for Fake {
     }
     fn host_key_prompt(&self, p: PromptInfo) {
         self.prompts.lock().unwrap().push(p);
+    }
+    fn credential_prompt(&self, p: CredentialPromptInfo) {
+        self.cred_prompts.lock().unwrap().push(p);
     }
     fn progress(&self, p: TransferInfo) {
         self.progress.lock().unwrap().push(p);
@@ -229,4 +233,49 @@ async fn unknown_connection_and_missing_vault_item_error_cleanly() {
 
 fn uuid_str() -> String {
     "00000000-0000-0000-0000-000000000000".into()
+}
+
+#[tokio::test]
+async fn connection_without_secret_asks_for_a_password() {
+    let s = setup().await;
+    // a second connection to the same server, but with no vault secret
+    let mut tree = s.mgr.tree();
+    let mut ask = s.conn.clone();
+    ask.id = uuid::Uuid::new_v4();
+    ask.name = "ask".into();
+    ask.secret = None;
+    tree.nodes.push(Node::Connection(ask.clone()));
+    s.mgr.save_tree(tree).unwrap();
+
+    // wrong password, then cancel -> error
+    let (mgr, ev) = (s.mgr.clone(), s.events.clone());
+    let task = tokio::spawn(async move {
+        until("prompt", || !ev.cred_prompts.lock().unwrap().is_empty()).await;
+        let p = ev.cred_prompts.lock().unwrap().remove(0);
+        assert_eq!((p.hop.as_str(), p.username.as_str()), ("ask", "alice"));
+        mgr.answer_credential(&p.prompt_id, None);
+    });
+    let err = s
+        .mgr
+        .open("c1", &ask.id.to_string(), 80, 24)
+        .await
+        .unwrap_err();
+    task.await.unwrap();
+    assert!(err.contains("cancelled"), "{err}");
+
+    // right password -> connects (host key prompt first)
+    let (mgr, ev) = (s.mgr.clone(), s.events.clone());
+    let task = tokio::spawn(async move {
+        until("prompt", || !ev.cred_prompts.lock().unwrap().is_empty()).await;
+        let p = ev.cred_prompts.lock().unwrap().remove(0);
+        mgr.answer_credential(&p.prompt_id, Some("pw".into()));
+    });
+    let hk = answer_next_prompt(&s, true);
+    s.mgr.open("c2", &ask.id.to_string(), 80, 24).await.unwrap();
+    task.await.unwrap();
+    hk.await.unwrap();
+    until("pty banner", || {
+        s.events.data.lock().unwrap().contains("pty 80x24")
+    })
+    .await;
 }

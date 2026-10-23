@@ -1,15 +1,16 @@
 // In-memory backend used by `vite dev` in a plain browser and by the e2e tests.
-import type { Backend, ConnectionDto, HostKeyPrompt, NodeDto, RemoteEntry, TransferProgress } from "./api";
+import type { Backend, ConnectionDto, CredentialPrompt, HostKeyPrompt, NodeDto, RemoteEntry, TransferProgress } from "./api";
 
 const sample: NodeDto[] = [
   {
     type: "folder",
     name: "prod",
     children: [
-      { type: "connection", id: "db", name: "db", protocol: "ssh", host: "db.example.com", username: "root", jump: ["bastion"] },
-      { type: "connection", id: "bastion", name: "bastion", protocol: "ssh", host: "bastion.example.com", username: "ops" },
+      { type: "connection", id: "db", name: "db", protocol: "ssh", host: "db.example.com", username: "root", jump: ["bastion"], secret: { provider: "bitwarden", item: "db-item", kind: "password" } },
+      { type: "connection", id: "bastion", name: "bastion", protocol: "ssh", host: "bastion.example.com", username: "ops", secret: { provider: "bitwarden", item: "bastion-item", kind: "password" } },
     ],
   },
+  { type: "connection", id: "adhoc", name: "adhoc", protocol: "ssh", host: "adhoc.example.com", username: "me" },
   { type: "connection", id: "sw", name: "switch", protocol: "telnet", host: "10.0.0.1", username: "admin" },
 ];
 
@@ -43,6 +44,10 @@ export class MockBackend implements Backend {
   private sessions = new Map<string, { conn: ConnectionDto; line: string }>();
   private hostPrompts = new Emitter<HostKeyPrompt>();
   private progress = new Emitter<TransferProgress>();
+  private credPrompts = new Emitter<CredentialPrompt>();
+  private pendingCred = new Map<string, (secret: string | null) => void>();
+  /** Passwords entered by the user, for assertions in tests. */
+  enteredPasswords: string[] = [];
   private pendingPrompt = new Map<string, (trust: boolean) => void>();
   private n = 0;
   /** Connections to which the user has already trusted the host key. */
@@ -70,6 +75,15 @@ export class MockBackend implements Backend {
     const conn = findConn(this.tree, connectionId);
     if (!conn) throw new Error("unknown connection");
     this.n++;
+    if (!conn.secret && conn.protocol !== "telnet") {
+      const promptId = `c${this.n}`;
+      const secret = await new Promise<string | null>((res) => {
+        this.pendingCred.set(promptId, res);
+        this.credPrompts.emit({ promptId, hop: conn.name, username: conn.username, host: conn.host });
+      });
+      if (secret === null) throw new Error(`${conn.name}: password entry cancelled`);
+      this.enteredPasswords.push(secret);
+    }
     if (!this.trusted.has(conn.host)) {
       const promptId = `p${this.n}`;
       const ok = await new Promise<boolean>((res) => {
@@ -118,6 +132,13 @@ export class MockBackend implements Backend {
   async answerHostKey(promptId: string, trust: boolean) {
     this.pendingPrompt.get(promptId)?.(trust);
     this.pendingPrompt.delete(promptId);
+  }
+  onCredentialPrompt(cb: (p: CredentialPrompt) => void) {
+    return this.credPrompts.on(cb);
+  }
+  async answerCredential(promptId: string, secret: string | null) {
+    this.pendingCred.get(promptId)?.(secret);
+    this.pendingCred.delete(promptId);
   }
   async sftpList(): Promise<RemoteEntry[]> {
     return [

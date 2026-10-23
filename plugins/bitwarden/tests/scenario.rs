@@ -3,7 +3,7 @@
 //! driven through the same `Manager` the GUI uses.
 
 use simpu_core::credentials::Credentials;
-use simpu_core::manager::{Events, Manager, PromptInfo, TransferInfo};
+use simpu_core::manager::{CredentialPromptInfo, Events, Manager, PromptInfo, TransferInfo};
 use simpu_core::model::{SecretKind, SecretRef};
 use simpu_core::plugin::PluginProvider;
 use simpu_core::{Connection, Node, Protocol, Tree};
@@ -30,6 +30,7 @@ impl Events for Fake {
     fn host_key_prompt(&self, p: PromptInfo) {
         self.prompts.lock().expect("lock").push(p);
     }
+    fn credential_prompt(&self, _: CredentialPromptInfo) {}
     fn progress(&self, _: TransferInfo) {}
 }
 

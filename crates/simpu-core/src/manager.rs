@@ -2,10 +2,11 @@
 //! of the GUI toolkit. The app shell implements [`Events`]; tests use a fake.
 
 use crate::credentials::Credentials;
+use crate::credentials::Secret;
 use crate::hostkeys::KnownHosts;
 use crate::model::{Protocol, Tree};
 use crate::sftp::{Progress, Sftp};
-use crate::ssh::{plan_hops, HostKeyPolicy, HostKeyPrompt, Shell, ShellEvent, SshSession};
+use crate::ssh::{plan_hops, HopAuth, HostKeyPolicy, HostKeyPrompt, Shell, ShellEvent, SshSession};
 use crate::telnet::{TelnetEvent, TelnetSession, TelnetWriter};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -20,6 +21,8 @@ pub trait Events: Send + Sync + 'static {
     fn data(&self, session: &str, bytes: Vec<u8>);
     fn closed(&self, session: &str, reason: String);
     fn host_key_prompt(&self, prompt: PromptInfo);
+    /// Ask the user for a password for `hop` (no vault secret is configured).
+    fn credential_prompt(&self, prompt: CredentialPromptInfo);
     fn progress(&self, p: TransferInfo);
 }
 
@@ -30,6 +33,15 @@ pub struct PromptInfo {
     pub host: String,
     pub port: u16,
     pub key: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialPromptInfo {
+    pub prompt_id: String,
+    pub hop: String,
+    pub username: String,
+    pub host: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -71,6 +83,7 @@ pub struct Manager<E: Events> {
     creds: Arc<Credentials>,
     sessions: Mutex<HashMap<String, Active>>,
     prompts: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+    secret_prompts: Mutex<HashMap<String, oneshot::Sender<Option<String>>>>,
     next_id: AtomicU64,
 }
 
@@ -95,6 +108,7 @@ impl<E: Events> Manager<E> {
             creds: Arc::new(creds),
             sessions: Mutex::new(HashMap::new()),
             prompts: Arc::new(Mutex::new(HashMap::new())),
+            secret_prompts: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(0),
         })
     }
@@ -112,6 +126,29 @@ impl<E: Events> Manager<E> {
     pub fn answer_host_key(&self, prompt_id: &str, trust: bool) {
         if let Some(tx) = lock(&self.prompts).remove(prompt_id) {
             let _ = tx.send(trust);
+        }
+    }
+
+    /// Answer a credential prompt; `None` cancels the connection attempt.
+    pub fn answer_credential(&self, prompt_id: &str, secret: Option<String>) {
+        if let Some(tx) = lock(&self.secret_prompts).remove(prompt_id) {
+            let _ = tx.send(secret);
+        }
+    }
+
+    async fn ask_password(&self, hop: &crate::ssh::Hop) -> Result<Secret, String> {
+        let (tx, rx) = oneshot::channel();
+        let prompt_id = Uuid::new_v4().to_string();
+        lock(&self.secret_prompts).insert(prompt_id.clone(), tx);
+        self.events.credential_prompt(CredentialPromptInfo {
+            prompt_id,
+            hop: hop.name.clone(),
+            username: hop.username.clone(),
+            host: hop.host.clone(),
+        });
+        match rx.await {
+            Ok(Some(p)) => Ok(Secret::new(p)),
+            _ => Err(format!("{}: password entry cancelled", hop.name)),
         }
     }
 
@@ -190,6 +227,12 @@ impl<E: Events> Manager<E> {
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
+        let mut hops = hops;
+        for hop in &mut hops {
+            if matches!(hop.auth, HopAuth::None) {
+                hop.auth = HopAuth::Password(self.ask_password(hop).await?);
+            }
+        }
         let session = SshSession::connect(&hops, self.known.clone(), self.policy())
             .await
             .map_err(|e| e.to_string())?;

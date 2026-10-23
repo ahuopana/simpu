@@ -2,7 +2,9 @@
 
 use serde::Serialize;
 use simpu_core::credentials::Credentials;
-use simpu_core::manager::{Events, Manager, PromptInfo, RemoteEntry, TransferInfo};
+use simpu_core::manager::{
+    CredentialPromptInfo, Events, Manager, PromptInfo, RemoteEntry, TransferInfo,
+};
 use simpu_core::model::{Node, Tree};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager as _, State};
@@ -24,6 +26,9 @@ impl Events for TauriEvents {
     }
     fn host_key_prompt(&self, p: PromptInfo) {
         self.emit("hostkey-prompt", p);
+    }
+    fn credential_prompt(&self, p: CredentialPromptInfo) {
+        self.emit("credential-prompt", p);
     }
     fn progress(&self, p: TransferInfo) {
         self.emit("transfer-progress", p);
@@ -71,6 +76,11 @@ fn session_close(app: State<'_, App>, session_id: String) {
 #[tauri::command]
 fn hostkey_answer(app: State<'_, App>, prompt_id: String, trust: bool) {
     app.answer_host_key(&prompt_id, trust);
+}
+
+#[tauri::command]
+fn credential_answer(app: State<'_, App>, prompt_id: String, secret: Option<String>) {
+    app.answer_credential(&prompt_id, secret);
 }
 
 #[tauri::command]
@@ -122,6 +132,7 @@ pub fn run() {
             session_resize,
             session_close,
             hostkey_answer,
+            credential_answer,
             sftp_list,
             sftp_upload,
             sftp_download
