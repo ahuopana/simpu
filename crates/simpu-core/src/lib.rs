@@ -8,6 +8,7 @@ pub mod hostkeys;
 pub mod jump;
 pub mod model;
 pub mod platform;
+pub mod plugin;
 pub mod ssh;
 pub mod store;
 

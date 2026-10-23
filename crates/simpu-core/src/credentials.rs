@@ -1,6 +1,6 @@
 //! Credential providers. Plugins (e.g. Bitwarden) implement [`CredentialProvider`].
 
-use crate::model::SecretRef;
+use crate::model::{SecretKind, SecretRef};
 use std::collections::HashMap;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -38,7 +38,7 @@ pub enum CredentialError {
 
 pub trait CredentialProvider: Send + Sync {
     fn id(&self) -> &str;
-    fn get(&self, item: &str) -> Result<Secret, CredentialError>;
+    fn get(&self, item: &str, kind: SecretKind) -> Result<Secret, CredentialError>;
 }
 
 /// Routes [`SecretRef`]s to registered providers.
@@ -56,7 +56,7 @@ impl Credentials {
         self.providers
             .get(&r.provider)
             .ok_or_else(|| CredentialError::NoProvider(r.provider.clone()))?
-            .get(&r.item)
+            .get(&r.item, r.kind)
     }
 }
 
@@ -86,7 +86,7 @@ impl CredentialProvider for StaticProvider {
     fn id(&self) -> &str {
         "static"
     }
-    fn get(&self, item: &str) -> Result<Secret, CredentialError> {
+    fn get(&self, item: &str, _kind: SecretKind) -> Result<Secret, CredentialError> {
         if self.locked {
             return Err(CredentialError::Locked);
         }

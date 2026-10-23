@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/simpu-core"]
+members = ["crates/simpu-core", "crates/simpu-plugin-api", "plugins/bitwarden"]
 
 [workspace.package]
 version = "0.1.0"

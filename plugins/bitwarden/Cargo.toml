@@ -1,0 +1,25 @@
+[package]
+name = "simpu-plugin-bitwarden"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Simpu credential provider backed by the Bitwarden CLI (bw)"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "simpu-plugin-bitwarden"
+path = "src/main.rs"
+
+[[bin]]
+name = "fake-bw"
+path = "src/bin/fake_bw.rs"
+
+[dependencies]
+simpu-plugin-api = { path = "../../crates/simpu-plugin-api" }
+serde_json = "1"
+
+[dev-dependencies]
+simpu-core = { path = "../../crates/simpu-core" }
