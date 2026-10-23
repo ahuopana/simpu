@@ -7,7 +7,7 @@ use simpu_core::credentials::{Credentials, Secret, StaticProvider};
 use simpu_core::hostkeys::KnownHosts;
 use simpu_core::model::{SecretKind, SecretRef};
 use simpu_core::ssh::{
-    always_trust, never_trust, plan_hops, ErrorKind, Hop, ShellEvent, SshSession,
+    always_trust, never_trust, plan_hops, ErrorKind, Hop, HopAuth, ShellEvent, SshSession,
 };
 use simpu_core::{Connection, Node, Protocol, Tree};
 use std::sync::atomic::Ordering;
@@ -19,7 +19,7 @@ fn hop(name: &str, port: u16, user: &str, pw: &str) -> Hop {
         host: "127.0.0.1".into(),
         port,
         username: user.into(),
-        password: Some(Secret::new(pw)),
+        auth: HopAuth::Password(Secret::new(pw)),
     }
 }
 
@@ -192,4 +192,83 @@ async fn interactive_shell_echo_resize_exit() {
     shell.write(b"exit\n").await.unwrap();
     assert_eq!(shell.next().await, ShellEvent::Exit(3));
     assert_eq!(shell.next().await, ShellEvent::Closed);
+}
+
+fn fresh_key() -> (String, String) {
+    let key =
+        russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519).unwrap();
+    let pem = key
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .unwrap()
+        .to_string();
+    (pem, key.public_key().to_openssh().unwrap())
+}
+
+fn key_hop(port: u16, user: &str, pem: &str) -> Hop {
+    Hop {
+        name: "keyed".into(),
+        host: "127.0.0.1".into(),
+        port,
+        username: user.into(),
+        auth: HopAuth::Key {
+            pem: Secret::new(pem),
+            passphrase: None,
+        },
+    }
+}
+
+#[tokio::test]
+async fn public_key_auth_accepts_registered_key_only() {
+    let (pem, public) = fresh_key();
+    let s = TestServer::start_full("srv", "alice", "unused", None, Some(public)).await;
+    let session = SshSession::connect(&[key_hop(s.port, "alice", &pem)], known(), always_trust())
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&session.exec("id").await.unwrap().stdout),
+        "srv says id"
+    );
+
+    let (other_pem, _) = fresh_key();
+    let err = SshSession::connect(
+        &[key_hop(s.port, "alice", &other_pem)],
+        known(),
+        always_trust(),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(matches!(err.kind, ErrorKind::AuthFailed));
+
+    let err = SshSession::connect(
+        &[key_hop(s.port, "alice", "not a key")],
+        known(),
+        always_trust(),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(matches!(err.kind, ErrorKind::BadKey(_)));
+}
+
+#[tokio::test]
+async fn keyfile_secret_from_vault_is_used_for_key_auth() {
+    let (pem, public) = fresh_key();
+    let s = TestServer::start_full("srv", "alice", "unused", None, Some(public)).await;
+    let mut c = Connection::new("srv", Protocol::Ssh, "127.0.0.1", "alice");
+    c.port = Some(s.port);
+    c.secret = Some(SecretRef {
+        provider: "static".into(),
+        item: "k".into(),
+        kind: SecretKind::KeyFile,
+    });
+    let tree = Tree {
+        nodes: vec![Node::Connection(c.clone())],
+    };
+    let mut creds = Credentials::default();
+    creds.register(Box::new(StaticProvider::new(&[("k", pem.as_str())])));
+    let hops = plan_hops(&tree, tree.find(c.id).unwrap(), &creds).unwrap();
+    SshSession::connect(&hops, known(), always_trust())
+        .await
+        .unwrap();
 }

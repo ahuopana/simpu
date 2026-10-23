@@ -3,7 +3,7 @@
 use crate::credentials::{CredentialError, Credentials, Secret};
 use crate::hostkeys::{KnownHosts, Verdict};
 use crate::jump::{resolve_chain, JumpError};
-use crate::model::{Connection, Tree};
+use crate::model::{Connection, SecretKind, Tree};
 use russh::client::{self, Handle};
 use russh::keys::PublicKeyOrCertificate;
 use russh::{Channel, ChannelMsg};
@@ -12,13 +12,25 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
+/// How to authenticate to one hop.
+pub enum HopAuth {
+    /// "none" authentication (servers that allow it).
+    None,
+    Password(Secret),
+    /// Private key in OpenSSH/PEM format, with an optional passphrase.
+    Key {
+        pem: Secret,
+        passphrase: Option<Secret>,
+    },
+}
+
 /// One hop of a connection: a jump host or the final target.
 pub struct Hop {
     pub name: String,
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub password: Option<Secret>,
+    pub auth: HopAuth,
 }
 
 #[derive(Debug, Error)]
@@ -41,19 +53,28 @@ pub fn plan_hops(
     resolve_chain(tree, target)?
         .into_iter()
         .map(|c| {
-            let password = match &c.secret {
-                Some(r) => Some(creds.resolve(r).map_err(|source| PlanError::Credential {
-                    hop: c.name.clone(),
-                    source,
-                })?),
-                None => None,
+            let auth = match &c.secret {
+                Some(r) => {
+                    let secret = creds.resolve(r).map_err(|source| PlanError::Credential {
+                        hop: c.name.clone(),
+                        source,
+                    })?;
+                    match r.kind {
+                        SecretKind::Password => HopAuth::Password(secret),
+                        SecretKind::KeyFile => HopAuth::Key {
+                            pem: secret,
+                            passphrase: None,
+                        },
+                    }
+                }
+                None => HopAuth::None,
             };
             Ok(Hop {
                 name: c.name.clone(),
                 host: c.host.clone(),
                 port: c.effective_port(),
                 username: c.username.clone(),
-                password,
+                auth,
             })
         })
         .collect()
@@ -69,6 +90,8 @@ pub enum ErrorKind {
     HostKeyChanged,
     #[error("authentication failed")]
     AuthFailed,
+    #[error("cannot use private key: {0}")]
+    BadKey(String),
     #[error("session error: {0}")]
     Session(String),
 }
@@ -213,17 +236,38 @@ impl SshSession {
                     return Err(err(kind));
                 }
             };
-            let ok = match &hop.password {
-                Some(p) => handle
+            let session_err = |e: russh::Error| err(ErrorKind::Session(e.to_string()));
+            let ok = match &hop.auth {
+                HopAuth::Password(p) => handle
                     .authenticate_password(hop.username.clone(), p.expose())
                     .await
-                    .map_err(|e| err(ErrorKind::Session(e.to_string())))?
+                    .map_err(session_err)?
                     .success(),
-                None => handle
+                HopAuth::None => handle
                     .authenticate_none(hop.username.clone())
                     .await
-                    .map_err(|e| err(ErrorKind::Session(e.to_string())))?
+                    .map_err(session_err)?
                     .success(),
+                HopAuth::Key { pem, passphrase } => {
+                    let key = russh::keys::decode_secret_key(
+                        pem.expose(),
+                        passphrase.as_ref().map(|p| p.expose()),
+                    )
+                    .map_err(|e| err(ErrorKind::BadKey(e.to_string())))?;
+                    let hash = handle
+                        .best_supported_rsa_hash()
+                        .await
+                        .map_err(session_err)?
+                        .flatten();
+                    handle
+                        .authenticate_publickey(
+                            hop.username.clone(),
+                            russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), hash),
+                        )
+                        .await
+                        .map_err(session_err)?
+                        .success()
+                }
             };
             if !ok {
                 return Err(err(ErrorKind::AuthFailed));

@@ -26,6 +26,8 @@ struct Handler {
     forwards: Arc<AtomicUsize>,
     shells: Vec<ChannelId>,
     sftp_root: Option<PathBuf>,
+    /// OpenSSH public key line accepted for public key auth.
+    accepted_key: Option<String>,
     channels: HashMap<ChannelId, Channel<Msg>>,
 }
 
@@ -39,6 +41,7 @@ impl Clone for Handler {
             forwards: self.forwards.clone(),
             shells: Vec::new(),
             sftp_root: self.sftp_root.clone(),
+            accepted_key: self.accepted_key.clone(),
             channels: HashMap::new(),
         }
     }
@@ -56,6 +59,19 @@ impl server::Handler for Handler {
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
         if user == self.user && password == self.password {
+            Ok(Auth::Accept)
+        } else {
+            Ok(Auth::reject())
+        }
+    }
+
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        key: &russh::keys::PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        let presented = key.to_openssh().unwrap_or_default();
+        if user == self.user && self.accepted_key.as_deref() == Some(presented.as_str()) {
             Ok(Auth::Accept)
         } else {
             Ok(Auth::reject())
@@ -205,6 +221,17 @@ impl TestServer {
         password: &str,
         sftp_root: Option<PathBuf>,
     ) -> Self {
+        Self::start_full(label, user, password, sftp_root, None).await
+    }
+
+    /// Full constructor; `accepted_key` is an OpenSSH public key line allowed for public key auth.
+    pub async fn start_full(
+        label: &str,
+        user: &str,
+        password: &str,
+        sftp_root: Option<PathBuf>,
+        accepted_key: Option<String>,
+    ) -> Self {
         let key =
             russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
                 .expect("key");
@@ -225,6 +252,7 @@ impl TestServer {
             forwards: forwards.clone(),
             shells: Vec::new(),
             sftp_root,
+            accepted_key,
             channels: HashMap::new(),
         };
         tokio::spawn(async move {

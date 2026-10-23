@@ -6,7 +6,7 @@ use common::TestServer;
 use simpu_core::credentials::Secret;
 use simpu_core::hostkeys::KnownHosts;
 use simpu_core::sftp::{Progress, SftpError};
-use simpu_core::ssh::{always_trust, Hop, SshSession};
+use simpu_core::ssh::{always_trust, Hop, HopAuth, SshSession};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -17,7 +17,7 @@ async fn connect(root: &std::path::Path) -> (TestServer, SshSession) {
         host: "127.0.0.1".into(),
         port: s.port,
         username: "alice".into(),
-        password: Some(Secret::new("pw")),
+        auth: HopAuth::Password(Secret::new("pw")),
     };
     let session = SshSession::connect(
         &[hop],
