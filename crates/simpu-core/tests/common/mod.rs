@@ -19,6 +19,7 @@ struct Handler {
     user: String,
     password: String,
     forwards: Arc<AtomicUsize>,
+    shells: Vec<ChannelId>,
 }
 
 impl server::Server for Handler {
@@ -61,6 +62,63 @@ impl server::Handler for Handler {
         session.exit_status_request(channel, 0)?;
         session.eof(channel)?;
         session.close(channel)?;
+        Ok(())
+    }
+
+    async fn pty_request(
+        &mut self,
+        channel: ChannelId,
+        _term: &str,
+        cols: u32,
+        rows: u32,
+        _pw: u32,
+        _ph: u32,
+        _modes: &[(russh::Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        session.data(channel, format!("pty {cols}x{rows}\n").into_bytes())?;
+        Ok(())
+    }
+
+    async fn shell_request(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        self.shells.push(channel);
+        Ok(())
+    }
+
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if !self.shells.contains(&channel) {
+            return Ok(()); // e.g. a direct-tcpip channel; its bytes belong to the forwarder
+        }
+        if data == b"exit\n" {
+            session.exit_status_request(channel, 3)?;
+            session.close(channel)?;
+        } else {
+            session.data(channel, [b"echo:".as_slice(), data].concat())?;
+        }
+        Ok(())
+    }
+
+    async fn window_change_request(
+        &mut self,
+        channel: ChannelId,
+        cols: u32,
+        rows: u32,
+        _pw: u32,
+        _ph: u32,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.data(channel, format!("resized {cols}x{rows}\n").into_bytes())?;
         Ok(())
     }
 
@@ -109,6 +167,7 @@ impl TestServer {
             user: user.into(),
             password: password.into(),
             forwards: forwards.clone(),
+            shells: Vec::new(),
         };
         tokio::spawn(async move {
             let _ = h.run_on_socket(config, &listener).await;

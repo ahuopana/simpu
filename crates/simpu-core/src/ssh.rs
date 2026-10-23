@@ -6,7 +6,7 @@ use crate::jump::{resolve_chain, JumpError};
 use crate::model::{Connection, Tree};
 use russh::client::{self, Handle};
 use russh::keys::PublicKeyOrCertificate;
-use russh::ChannelMsg;
+use russh::{Channel, ChannelMsg};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -254,5 +254,57 @@ impl SshSession {
             }
         }
         Ok(out)
+    }
+}
+
+/// Something that happened on an interactive shell.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ShellEvent {
+    Data(Vec<u8>),
+    Exit(u32),
+    Closed,
+}
+
+/// An interactive shell with a PTY; the terminal emulator sits on top of this.
+pub struct Shell {
+    channel: Channel<client::Msg>,
+}
+
+impl Shell {
+    pub async fn write(&self, bytes: &[u8]) -> Result<(), russh::Error> {
+        self.channel.data_bytes(bytes.to_vec()).await
+    }
+
+    pub async fn resize(&self, cols: u32, rows: u32) -> Result<(), russh::Error> {
+        self.channel.window_change(cols, rows, 0, 0).await
+    }
+
+    /// Next event; `Closed` once the channel is gone. stderr is merged into `Data`.
+    pub async fn next(&mut self) -> ShellEvent {
+        loop {
+            match self.channel.wait().await {
+                Some(ChannelMsg::Data { data }) => return ShellEvent::Data(data.to_vec()),
+                Some(ChannelMsg::ExtendedData { data, .. }) => {
+                    return ShellEvent::Data(data.to_vec())
+                }
+                Some(ChannelMsg::ExitStatus { exit_status }) => {
+                    return ShellEvent::Exit(exit_status)
+                }
+                Some(_) => continue,
+                None => return ShellEvent::Closed,
+            }
+        }
+    }
+}
+
+impl SshSession {
+    /// Open an interactive shell with a pseudo terminal of the given size.
+    pub async fn open_shell(&self, cols: u32, rows: u32) -> Result<Shell, russh::Error> {
+        let channel = self.handle.channel_open_session().await?;
+        channel
+            .request_pty(true, "xterm-256color", cols, rows, 0, 0, &[])
+            .await?;
+        channel.request_shell(true).await?;
+        Ok(Shell { channel })
     }
 }

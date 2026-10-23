@@ -4,7 +4,9 @@ use common::TestServer;
 use simpu_core::credentials::{Credentials, Secret, StaticProvider};
 use simpu_core::hostkeys::KnownHosts;
 use simpu_core::model::{SecretKind, SecretRef};
-use simpu_core::ssh::{always_trust, never_trust, plan_hops, ErrorKind, Hop, SshSession};
+use simpu_core::ssh::{
+    always_trust, never_trust, plan_hops, ErrorKind, Hop, ShellEvent, SshSession,
+};
 use simpu_core::{Connection, Node, Protocol, Tree};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -156,4 +158,36 @@ async fn locked_vault_blocks_planning() {
     let mut creds = Credentials::default();
     creds.register(Box::new(StaticProvider::new(&[("x", "y")]).locked()));
     assert!(plan_hops(&tree, tree.find(c.id).unwrap(), &creds).is_err());
+}
+
+async fn read_until(shell: &mut simpu_core::ssh::Shell, needle: &str) -> String {
+    let mut acc = String::new();
+    while !acc.contains(needle) {
+        match shell.next().await {
+            ShellEvent::Data(d) => acc.push_str(&String::from_utf8_lossy(&d)),
+            other => panic!("unexpected {other:?} while waiting for {needle:?}, got {acc:?}"),
+        }
+    }
+    acc
+}
+
+#[tokio::test]
+async fn interactive_shell_echo_resize_exit() {
+    let s = TestServer::start("srv", "alice", "pw").await;
+    let session = SshSession::connect(
+        &[hop("srv", s.port, "alice", "pw")],
+        known(),
+        always_trust(),
+    )
+    .await
+    .unwrap();
+    let mut shell = session.open_shell(80, 24).await.unwrap();
+    read_until(&mut shell, "pty 80x24").await;
+    shell.write(b"hi\n").await.unwrap();
+    read_until(&mut shell, "echo:hi").await;
+    shell.resize(120, 40).await.unwrap();
+    read_until(&mut shell, "resized 120x40").await;
+    shell.write(b"exit\n").await.unwrap();
+    assert_eq!(shell.next().await, ShellEvent::Exit(3));
+    assert_eq!(shell.next().await, ShellEvent::Closed);
 }
