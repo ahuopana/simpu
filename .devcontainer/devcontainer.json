@@ -1,0 +1,8 @@
+{
+  "name": "simpu",
+  "build": { "dockerfile": "Dockerfile" },
+  "customizations": {
+    "vscode": { "extensions": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml"] }
+  },
+  "postCreateCommand": "rustup target add x86_64-pc-windows-msvc"
+}
