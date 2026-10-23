@@ -5,7 +5,7 @@ import type { ConnectionDto, NodeDto } from "./api";
 import { backend, inTauri } from "./backend";
 import { closeLeaf, type Dir, leaves, newTab, type Pane, splitLeaf, type Tab } from "./layout";
 import "./style.css";
-import { filterTree, findConnection } from "./tree";
+import { addFolder, allConnections, filterTree, findConnection, folderNames, folderOf, newId, removeConnection, upsertConnection, validate } from "./tree";
 
 interface View {
   leafId: string;
@@ -48,8 +48,16 @@ function renderTree() {
         c.title = `${n.protocol}://${n.username}@${n.host}${n.port ? ":" + n.port : ""}`;
         c.innerHTML = `<span>${esc(n.name)}</span><span class="proto">${n.protocol}</span>${
           n.protocol === "telnet" ? '<span class="warn" title="Telnet is not encrypted">⚠</span>' : ""
-        }`;
+        }<span class="spacer"></span><span class="act" data-testid="edit-${esc(n.name)}" title="Edit">✎</span><span class="act" data-testid="delete-${esc(n.name)}" title="Delete">✕</span>`;
         c.addEventListener("dblclick", () => void openConnection(n));
+        c.querySelector('[title="Edit"]')!.addEventListener("click", (e) => {
+          e.stopPropagation();
+          openEditor(n);
+        });
+        c.querySelector('[title="Delete"]')!.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (confirm(`Delete "${n.name}"?`)) void persist(removeConnection(nodes, n.id));
+        });
         into.append(c);
       }
     }
@@ -59,6 +67,89 @@ function renderTree() {
 
 function esc(s: string) {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
+}
+
+async function persist(next: NodeDto[]) {
+  nodes = next;
+  renderTree();
+  try {
+    await backend.saveTree(next);
+  } catch (e) {
+    toast(`Could not save connections: ${String(e)}`, true);
+  }
+}
+
+// ---------- connection editor ----------
+function openEditor(existing?: ConnectionDto) {
+  const m = $("modal");
+  const jumpCandidates = allConnections(nodes).filter((c) => c.protocol === "ssh" && c.id !== existing?.id);
+  const folders = folderNames(nodes);
+  const cur = existing ? folderOf(nodes, existing.id) ?? null : null;
+  m.hidden = false;
+  m.innerHTML = `<form class="box" data-testid="editor" novalidate>
+    <h3>${existing ? "Edit" : "New"} connection</h3>
+    <label>Name</label><input name="name" data-testid="edit-name" />
+    <span></span><span class="err" data-err="name"></span>
+    <label>Protocol</label><select name="protocol" data-testid="edit-protocol">
+      ${["ssh", "sftp", "scp", "telnet"].map((p) => `<option>${p}</option>`).join("")}</select>
+    <label>Host</label><input name="host" data-testid="edit-host" />
+    <span class="err" data-err="host"></span>
+    <label>Port</label><input name="port" data-testid="edit-port" placeholder="default" />
+    <span class="err" data-err="port"></span>
+    <label>User</label><input name="username" data-testid="edit-user" />
+    <label>Secret from</label><select name="provider" data-testid="edit-provider">
+      <option value="">(ask / none)</option><option>bitwarden</option></select>
+    <label>Secret item</label><input name="item" data-testid="edit-item" placeholder="item id" />
+    <span class="err" data-err="secret"></span>
+    <label>Secret kind</label><select name="kind" data-testid="edit-kind"><option>password</option><option>keyfile</option></select>
+    <label>Jump hosts</label><select name="jump" data-testid="edit-jump" multiple size="3">
+      ${jumpCandidates.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")}</select>
+    <label>Folder</label><select name="folder" data-testid="edit-folder">
+      <option value="">(top level)</option>${folders.map((f) => `<option>${esc(f)}</option>`).join("")}</select>
+    <div class="buttons"><button type="button" data-testid="edit-cancel">Cancel</button>
+    <button type="submit" data-testid="edit-save">Save</button></div></form>`;
+  const form = m.querySelector("form")!;
+  const f = (n: string) => form.elements.namedItem(n) as HTMLInputElement & HTMLSelectElement;
+  if (existing) {
+    f("name").value = existing.name;
+    f("protocol").value = existing.protocol;
+    f("host").value = existing.host;
+    f("port").value = existing.port ? String(existing.port) : "";
+    f("username").value = existing.username;
+    f("provider").value = existing.secret?.provider ?? "";
+    f("item").value = existing.secret?.item ?? "";
+    f("kind").value = existing.secret?.kind ?? "password";
+    for (const o of Array.from(f("jump").options)) o.selected = existing.jump?.includes(o.value) ?? false;
+    f("folder").value = cur ?? "";
+  }
+  const close = () => {
+    m.hidden = true;
+    m.replaceChildren();
+  };
+  m.querySelector('[data-testid="edit-cancel"]')!.addEventListener("click", close);
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const port = f("port").value.trim();
+    const conn: ConnectionDto = {
+      type: "connection",
+      id: existing?.id ?? newId(),
+      name: f("name").value.trim(),
+      protocol: f("protocol").value as ConnectionDto["protocol"],
+      host: f("host").value.trim(),
+      username: f("username").value.trim(),
+      ...(port ? { port: Number(port) } : {}),
+      jump: Array.from(f("jump").selectedOptions).map((o) => o.value),
+      ...(f("provider").value
+        ? { secret: { provider: f("provider").value, item: f("item").value.trim(), kind: f("kind").value as "password" | "keyfile" } }
+        : {}),
+    };
+    const errors = validate(conn);
+    form.querySelectorAll<HTMLElement>("[data-err]").forEach((el) => (el.textContent = errors[el.dataset.err!] ?? ""));
+    if (Object.keys(errors).length) return;
+    close();
+    void persist(upsertConnection(nodes, conn, f("folder").value || null));
+  });
+  f("name").focus();
 }
 
 // ---------- sessions / views ----------
@@ -358,6 +449,11 @@ $("split-row").addEventListener("click", () => split("row"));
 $("split-col").addEventListener("click", () => split("col"));
 $("close-pane").addEventListener("click", closePane);
 $("search").addEventListener("input", renderTree);
+$("new-conn").addEventListener("click", () => openEditor());
+$("new-folder").addEventListener("click", () => {
+  const name = prompt("Folder name");
+  if (name) void persist(addFolder(nodes, name));
+});
 
 void (async () => {
   nodes = await backend.loadTree();

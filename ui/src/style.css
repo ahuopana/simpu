@@ -39,3 +39,14 @@ html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:
 #modal code { display:block; word-break:break-all; margin:8px 0; color:var(--muted); }
 #modal button { margin-right:8px; padding:4px 12px; }
 .empty { color:var(--muted); padding:24px; }
+
+#side-actions { display:flex; gap:6px; padding:8px 8px 0; }
+#side-actions button, #modal button { background:var(--bg); color:var(--fg); border:1px solid #444; border-radius:4px; padding:3px 8px; cursor:pointer; }
+.conn .spacer { flex:1; }
+.conn .act { visibility:hidden; color:var(--muted); }
+.conn:hover .act { visibility:visible; }
+#modal form { display:grid; grid-template-columns:110px 1fr; gap:6px 10px; align-items:center; min-width:460px; }
+#modal form h3 { grid-column:1/-1; margin:0 0 4px; }
+#modal input, #modal select { background:var(--bg); color:var(--fg); border:1px solid #444; border-radius:4px; padding:4px; }
+#modal .err { grid-column:2; color:#f66; font-size:11px; }
+#modal .buttons { grid-column:1/-1; display:flex; justify-content:flex-end; gap:8px; margin-top:6px; }

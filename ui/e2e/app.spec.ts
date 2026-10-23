@@ -88,3 +88,57 @@ test("exit closes the session", async ({ page }) => {
   await type(page, "exit\r");
   await expect(page.locator(".closed")).toContainText("session closed");
 });
+
+test.describe("connection editor", () => {
+  test("create a connection with a vault secret and a jump host, then connect", async ({ page }) => {
+    await page.getByTestId("new-conn").click();
+    await page.getByTestId("edit-save").click();
+    await expect(page.getByTestId("editor")).toContainText("Name is required");
+    await expect(page.getByTestId("editor")).toContainText("Host is required");
+
+    await page.getByTestId("edit-name").fill("web");
+    await page.getByTestId("edit-host").fill("web.example.com");
+    await page.getByTestId("edit-port").fill("99999");
+    await page.getByTestId("edit-save").click();
+    await expect(page.getByTestId("editor")).toContainText("Port must be 1-65535");
+    await page.getByTestId("edit-port").fill("2222");
+    await page.getByTestId("edit-user").fill("deploy");
+    await page.getByTestId("edit-provider").selectOption("bitwarden");
+    await page.getByTestId("edit-save").click();
+    await expect(page.getByTestId("editor")).toContainText("Secret item is required");
+    await page.getByTestId("edit-item").fill("abc-123");
+    await page.getByTestId("edit-jump").selectOption({ label: "bastion" });
+    await page.getByTestId("edit-folder").selectOption("prod");
+    await page.getByTestId("edit-save").click();
+
+    await expect(page.getByTestId("conn-web")).toBeVisible();
+    const saved = await page.evaluate(() => (window as any).__simpu.backend.tree);
+    const prod = saved.find((n: any) => n.name === "prod");
+    expect(prod.children.find((c: any) => c.name === "web")).toMatchObject({
+      host: "web.example.com", port: 2222, username: "deploy", jump: ["bastion"],
+      secret: { provider: "bitwarden", item: "abc-123", kind: "password" },
+    });
+    await open(page, "web");
+    await expect.poll(() => screen(page)).toContain("Connected to deploy@web.example.com");
+  });
+
+  test("edit and delete", async ({ page }) => {
+    await page.getByTestId("conn-switch").hover();
+    await page.getByTestId("edit-switch").click();
+    await page.getByTestId("edit-host").fill("10.9.9.9");
+    await page.getByTestId("edit-save").click();
+    const tree = await page.evaluate(() => (window as any).__simpu.backend.tree);
+    expect(JSON.stringify(tree)).toContain("10.9.9.9");
+
+    page.once("dialog", (d) => void d.accept());
+    await page.getByTestId("conn-switch").hover();
+    await page.getByTestId("delete-switch").click();
+    await expect(page.getByTestId("conn-switch")).toHaveCount(0);
+  });
+
+  test("new folder", async ({ page }) => {
+    page.once("dialog", (d) => void d.accept("staging"));
+    await page.getByTestId("new-folder").click();
+    await expect(page.getByTestId("tree")).toContainText("staging");
+  });
+});
