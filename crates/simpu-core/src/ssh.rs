@@ -1,0 +1,258 @@
+//! SSH client sessions, including multi-hop jump host chains.
+
+use crate::credentials::{CredentialError, Credentials, Secret};
+use crate::hostkeys::{KnownHosts, Verdict};
+use crate::jump::{resolve_chain, JumpError};
+use crate::model::{Connection, Tree};
+use russh::client::{self, Handle};
+use russh::keys::PublicKeyOrCertificate;
+use russh::ChannelMsg;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use thiserror::Error;
+
+/// One hop of a connection: a jump host or the final target.
+pub struct Hop {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: Option<Secret>,
+}
+
+#[derive(Debug, Error)]
+pub enum PlanError {
+    #[error(transparent)]
+    Jump(#[from] JumpError),
+    #[error("credentials for {hop}: {source}")]
+    Credential {
+        hop: String,
+        source: CredentialError,
+    },
+}
+
+/// Expand jump hosts and fetch each hop's password from the credential providers.
+pub fn plan_hops(
+    tree: &Tree,
+    target: &Connection,
+    creds: &Credentials,
+) -> Result<Vec<Hop>, PlanError> {
+    resolve_chain(tree, target)?
+        .into_iter()
+        .map(|c| {
+            let password = match &c.secret {
+                Some(r) => Some(creds.resolve(r).map_err(|source| PlanError::Credential {
+                    hop: c.name.clone(),
+                    source,
+                })?),
+                None => None,
+            };
+            Ok(Hop {
+                name: c.name.clone(),
+                host: c.host.clone(),
+                port: c.effective_port(),
+                username: c.username.clone(),
+                password,
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Error)]
+pub enum ErrorKind {
+    #[error("connection failed: {0}")]
+    Connect(String),
+    #[error("host key rejected by user")]
+    HostKeyRejected,
+    #[error("HOST KEY CHANGED (possible man-in-the-middle attack)")]
+    HostKeyChanged,
+    #[error("authentication failed")]
+    AuthFailed,
+    #[error("session error: {0}")]
+    Session(String),
+}
+
+/// An error that names the hop where it happened.
+#[derive(Debug, Error)]
+#[error("hop {index} ({name}): {kind}")]
+pub struct SshError {
+    pub index: usize,
+    pub name: String,
+    pub kind: ErrorKind,
+}
+
+/// What the user is asked when meeting an unknown host.
+pub struct HostKeyPrompt {
+    pub host: String,
+    pub port: u16,
+    pub key: String,
+}
+
+pub type PromptFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
+/// Called for unknown hosts; return true to trust and remember the key.
+pub type HostKeyPolicy = Arc<dyn Fn(HostKeyPrompt) -> PromptFuture + Send + Sync>;
+
+pub fn always_trust() -> HostKeyPolicy {
+    Arc::new(|_| Box::pin(async { true }))
+}
+
+pub fn never_trust() -> HostKeyPolicy {
+    Arc::new(|_| Box::pin(async { false }))
+}
+
+struct ClientHandler {
+    host: String,
+    port: u16,
+    known: Arc<Mutex<KnownHosts>>,
+    policy: HostKeyPolicy,
+    failure: Arc<Mutex<Option<ErrorKind>>>,
+}
+
+impl client::Handler for ClientHandler {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        key: &PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        let PublicKeyOrCertificate::PublicKey { key, .. } = key else {
+            return Ok(false);
+        };
+        let line = key.to_openssh().unwrap_or_default();
+        let verdict = lock(&self.known).verify(&self.host, self.port, &line);
+        let fail = |k| *lock(&self.failure) = Some(k);
+        match verdict {
+            Verdict::Trusted => Ok(true),
+            Verdict::Changed { .. } => {
+                fail(ErrorKind::HostKeyChanged);
+                Ok(false)
+            }
+            Verdict::Unknown => {
+                let prompt = HostKeyPrompt {
+                    host: self.host.clone(),
+                    port: self.port,
+                    key: line.clone(),
+                };
+                if (self.policy)(prompt).await {
+                    lock(&self.known).add(&self.host, self.port, &line);
+                    Ok(true)
+                } else {
+                    fail(ErrorKind::HostKeyRejected);
+                    Ok(false)
+                }
+            }
+        }
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Output of a remote command.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ExecOutput {
+    pub stdout: Vec<u8>,
+    pub exit_status: Option<u32>,
+}
+
+/// A connected, authenticated session on the final hop. Keeps the jump
+/// sessions alive for as long as it exists.
+pub struct SshSession {
+    handle: Handle<ClientHandler>,
+    _jumps: Vec<Handle<ClientHandler>>,
+}
+
+impl SshSession {
+    /// Connect through all `hops` in order; the last one is the target.
+    pub async fn connect(
+        hops: &[Hop],
+        known: Arc<Mutex<KnownHosts>>,
+        policy: HostKeyPolicy,
+    ) -> Result<Self, SshError> {
+        let config = Arc::new(client::Config::default());
+        let mut sessions: Vec<Handle<ClientHandler>> = Vec::new();
+        for (index, hop) in hops.iter().enumerate() {
+            let err = |kind| SshError {
+                index,
+                name: hop.name.clone(),
+                kind,
+            };
+            let failure = Arc::new(Mutex::new(None));
+            let handler = ClientHandler {
+                host: hop.host.clone(),
+                port: hop.port,
+                known: known.clone(),
+                policy: policy.clone(),
+                failure: failure.clone(),
+            };
+            let connected = match sessions.last() {
+                None => {
+                    client::connect(config.clone(), (hop.host.as_str(), hop.port), handler).await
+                }
+                Some(prev) => {
+                    let ch = prev
+                        .channel_open_direct_tcpip(
+                            hop.host.clone(),
+                            hop.port.into(),
+                            "127.0.0.1",
+                            0,
+                        )
+                        .await
+                        .map_err(|e| err(ErrorKind::Connect(e.to_string())))?;
+                    client::connect_stream(config.clone(), ch.into_stream(), handler).await
+                }
+            };
+            let mut handle = match connected {
+                Ok(h) => h,
+                Err(e) => {
+                    let kind = lock(&failure)
+                        .take()
+                        .unwrap_or(ErrorKind::Connect(e.to_string()));
+                    return Err(err(kind));
+                }
+            };
+            let ok = match &hop.password {
+                Some(p) => handle
+                    .authenticate_password(hop.username.clone(), p.expose())
+                    .await
+                    .map_err(|e| err(ErrorKind::Session(e.to_string())))?
+                    .success(),
+                None => handle
+                    .authenticate_none(hop.username.clone())
+                    .await
+                    .map_err(|e| err(ErrorKind::Session(e.to_string())))?
+                    .success(),
+            };
+            if !ok {
+                return Err(err(ErrorKind::AuthFailed));
+            }
+            sessions.push(handle);
+        }
+        let handle = sessions.pop().ok_or(SshError {
+            index: 0,
+            name: String::new(),
+            kind: ErrorKind::Connect("no hops".into()),
+        })?;
+        Ok(Self {
+            handle,
+            _jumps: sessions,
+        })
+    }
+
+    /// Run a command and collect stdout.
+    pub async fn exec(&self, command: &str) -> Result<ExecOutput, russh::Error> {
+        let mut ch = self.handle.channel_open_session().await?;
+        ch.exec(true, command).await?;
+        let mut out = ExecOutput::default();
+        while let Some(msg) = ch.wait().await {
+            match msg {
+                ChannelMsg::Data { data } => out.stdout.extend_from_slice(&data),
+                ChannelMsg::ExitStatus { exit_status } => out.exit_status = Some(exit_status),
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+}

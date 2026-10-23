@@ -14,6 +14,9 @@ toml = "0.8"
 thiserror = "2"
 zeroize = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+russh = "0.64"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
 
 [dev-dependencies]
 tempfile = "3"
+rand = "0.10"

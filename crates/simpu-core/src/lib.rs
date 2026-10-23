@@ -8,6 +8,7 @@ pub mod hostkeys;
 pub mod jump;
 pub mod model;
 pub mod platform;
+pub mod ssh;
 pub mod store;
 
 pub use model::{Connection, Folder, Node, Protocol, Tree};
