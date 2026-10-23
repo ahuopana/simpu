@@ -5,6 +5,7 @@
 
 pub mod credentials;
 pub mod hostkeys;
+pub mod import;
 pub mod jump;
 pub mod manager;
 pub mod model;

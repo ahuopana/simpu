@@ -79,6 +79,14 @@ fn hostkey_answer(app: State<'_, App>, prompt_id: String, trust: bool) {
 }
 
 #[tauri::command]
+fn import_ssh_config(app: State<'_, App>) -> Result<usize, String> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .ok_or("cannot find home directory")?;
+    app.import_ssh_config(&std::path::PathBuf::from(home).join(".ssh").join("config"))
+}
+
+#[tauri::command]
 fn credential_answer(app: State<'_, App>, prompt_id: String, secret: Option<String>) {
     app.answer_credential(&prompt_id, secret);
 }
@@ -133,6 +141,7 @@ pub fn run() {
             session_close,
             hostkey_answer,
             credential_answer,
+            import_ssh_config,
             sftp_list,
             sftp_upload,
             sftp_download
@@ -145,6 +154,7 @@ pub fn run() {
 /// executable sits next to the app and `BW_SESSION` is set (`bw unlock --raw`).
 fn load_credentials() -> Credentials {
     let mut creds = Credentials::default();
+    creds.register(Box::new(simpu_core::credentials::FileProvider::from_env()));
     if let (Ok(exe), Ok(session)) = (std::env::current_exe(), std::env::var("BW_SESSION")) {
         let name = if cfg!(windows) {
             "simpu-plugin-bitwarden.exe"

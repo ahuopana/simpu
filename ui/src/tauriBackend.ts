@@ -16,6 +16,7 @@ function sub<T>(event: string, cb: (p: T) => void): Unlisten {
 export const tauriBackend: Backend = {
   loadTree: () => invoke("tree_load"),
   saveTree: (nodes) => invoke("tree_save", { nodes }),
+  importSshConfig: () => invoke("import_ssh_config"),
   openSession: (sessionId, connectionId, cols, rows) => invoke("session_open", { sessionId, connectionId, cols, rows }),
   write: (sessionId, data) => invoke("session_write", { sessionId, data }),
   resize: (sessionId, cols, rows) => invoke("session_resize", { sessionId, cols, rows }),

@@ -4,7 +4,7 @@
 use crate::credentials::Credentials;
 use crate::credentials::Secret;
 use crate::hostkeys::KnownHosts;
-use crate::model::{Protocol, Tree};
+use crate::model::{Folder, Node, Protocol, Tree};
 use crate::sftp::{Progress, Sftp};
 use crate::ssh::{plan_hops, HopAuth, HostKeyPolicy, HostKeyPrompt, Shell, ShellEvent, SshSession};
 use crate::telnet::{TelnetEvent, TelnetSession, TelnetWriter};
@@ -121,6 +121,26 @@ impl<E: Events> Manager<E> {
         crate::store::save(&self.tree_path, &tree).map_err(|e| e.to_string())?;
         *lock(&self.tree) = tree;
         Ok(())
+    }
+
+    /// Import hosts from an OpenSSH config file into a new folder; returns how many were added.
+    pub fn import_ssh_config(&self, path: &std::path::Path) -> Result<usize, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let user = std::env::var("USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_default();
+        let conns = crate::import::parse_ssh_config(&text, &user);
+        let n = conns.len();
+        if n == 0 {
+            return Ok(0);
+        }
+        let mut tree = self.tree();
+        tree.nodes.push(Node::Folder(Folder {
+            name: "Imported from ssh_config".into(),
+            children: conns.into_iter().map(Node::Connection).collect(),
+        }));
+        self.save_tree(tree)?;
+        Ok(n)
     }
 
     pub fn answer_host_key(&self, prompt_id: &str, trust: bool) {

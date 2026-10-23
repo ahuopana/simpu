@@ -61,6 +61,18 @@ export class MockBackend implements Backend {
     this.tree = structuredClone(nodes);
   }
 
+  async importSshConfig() {
+    this.tree.push({
+      type: "folder",
+      name: "Imported from ssh_config",
+      children: [
+        { type: "connection", id: "imp1", name: "imported-a", protocol: "ssh", host: "a.example.com", username: "me", secret: { provider: "file", item: "~/.ssh/id_ed25519", kind: "keyfile" } },
+        { type: "connection", id: "imp2", name: "imported-b", protocol: "ssh", host: "b.example.com", username: "me", jump: ["imp1"] },
+      ],
+    });
+    return 2;
+  }
+
   private em<T>(m: Map<string, Emitter<T>>, id: string) {
     let e = m.get(id);
     if (!e) m.set(id, (e = new Emitter<T>()));

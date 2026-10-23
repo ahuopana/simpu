@@ -473,6 +473,16 @@ $("split-col").addEventListener("click", () => split("col"));
 $("close-pane").addEventListener("click", closePane);
 $("search").addEventListener("input", renderTree);
 $("new-conn").addEventListener("click", () => openEditor());
+$("import-ssh").addEventListener("click", () => {
+  backend
+    .importSshConfig()
+    .then(async (n) => {
+      nodes = await backend.loadTree();
+      renderTree();
+      toast(n ? `Imported ${n} host${n === 1 ? "" : "s"} from ssh config` : "No hosts found in ssh config");
+    })
+    .catch((e: unknown) => toast(`Import failed: ${String(e)}`, true));
+});
 $("new-folder").addEventListener("click", () => {
   const name = prompt("Folder name");
   if (name) void persist(addFolder(nodes, name));

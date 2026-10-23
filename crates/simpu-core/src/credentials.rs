@@ -2,6 +2,7 @@
 
 use crate::model::{SecretKind, SecretRef};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -97,6 +98,52 @@ impl CredentialProvider for StaticProvider {
     }
 }
 
+/// Reads secrets from local files (e.g. an unencrypted private key on disk).
+/// The item is a path; a leading `~` expands to the user's home directory.
+pub struct FileProvider {
+    home: Option<PathBuf>,
+}
+
+impl FileProvider {
+    pub fn new(home: Option<PathBuf>) -> Self {
+        Self { home }
+    }
+
+    /// Home from `USERPROFILE` (Windows) or `HOME`.
+    pub fn from_env() -> Self {
+        Self::new(
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(PathBuf::from),
+        )
+    }
+
+    fn expand(&self, item: &str) -> PathBuf {
+        match (
+            item.strip_prefix("~/").or_else(|| item.strip_prefix("~\\")),
+            &self.home,
+        ) {
+            (Some(rest), Some(home)) => home.join(rest),
+            _ => PathBuf::from(item),
+        }
+    }
+}
+
+impl CredentialProvider for FileProvider {
+    fn id(&self) -> &str {
+        "file"
+    }
+    fn get(&self, item: &str, _kind: SecretKind) -> Result<Secret, CredentialError> {
+        match std::fs::read_to_string(self.expand(item)) {
+            Ok(s) => Ok(Secret::new(s)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(CredentialError::NotFound(item.into()))
+            }
+            Err(e) => Err(CredentialError::Other(format!("{item}: {e}"))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +182,27 @@ mod tests {
         c.register(Box::new(StaticProvider::new(&[])));
         assert!(matches!(
             c.resolve(&r("static", "zz")),
+            Err(CredentialError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn file_provider_reads_expands_home_and_reports_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("key"), "PEM").unwrap();
+        let p = FileProvider::new(Some(dir.path().to_path_buf()));
+        assert_eq!(p.get("~/key", SecretKind::KeyFile).unwrap().expose(), "PEM");
+        assert_eq!(
+            p.get(
+                dir.path().join("key").to_str().unwrap(),
+                SecretKind::KeyFile
+            )
+            .unwrap()
+            .expose(),
+            "PEM"
+        );
+        assert!(matches!(
+            p.get("~/nope", SecretKind::KeyFile),
             Err(CredentialError::NotFound(_))
         ));
     }

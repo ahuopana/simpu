@@ -55,6 +55,8 @@ export type Unlisten = () => void;
 export interface Backend {
   loadTree(): Promise<NodeDto[]>;
   saveTree(nodes: NodeDto[]): Promise<void>;
+  /** Import ~/.ssh/config into a new folder; resolves to the number of hosts added. */
+  importSshConfig(): Promise<number>;
 
   /** The caller picks `sessionId` and subscribes to onData/onClosed *before* calling, so no output is missed. */
   openSession(sessionId: string, connectionId: string, cols: number, rows: number): Promise<void>;

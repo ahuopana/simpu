@@ -167,3 +167,10 @@ test.describe("ad-hoc password", () => {
     await expect.poll(() => screen(page)).toContain("Connected");
   });
 });
+
+test("import ssh config adds a folder of hosts", async ({ page }) => {
+  await page.getByTestId("import-ssh").click();
+  await expect(page.getByTestId("toasts")).toContainText("Imported 2 hosts");
+  await expect(page.getByTestId("conn-imported-a")).toBeVisible();
+  await expect(page.getByTestId("tree")).toContainText("Imported from ssh_config");
+});

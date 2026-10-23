@@ -279,3 +279,36 @@ async fn connection_without_secret_asks_for_a_password() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn imports_ssh_config_into_a_folder() {
+    let s = setup().await;
+    let cfg = s.dir.path().join("ssh_config");
+    std::fs::write(
+        &cfg,
+        "Host gw\n  HostName gw.example.com\nHost app\n  HostName app.internal\n  ProxyJump gw\n",
+    )
+    .unwrap();
+    assert_eq!(s.mgr.import_ssh_config(&cfg).unwrap(), 2);
+    let tree = s.mgr.tree();
+    assert_eq!(tree.connections().len(), 3, "original + 2 imported");
+    let app = tree
+        .connections()
+        .into_iter()
+        .find(|c| c.name == "app")
+        .unwrap();
+    assert_eq!(app.jump.len(), 1);
+    assert_eq!(tree.find(app.jump[0]).unwrap().name, "gw");
+    // persisted
+    let again = Manager::new(
+        Arc::new(Fake::default()),
+        s.dir.path().to_path_buf(),
+        Credentials::default(),
+    )
+    .unwrap();
+    assert_eq!(again.tree().connections().len(), 3);
+    assert!(s
+        .mgr
+        .import_ssh_config(&s.dir.path().join("missing"))
+        .is_err());
+}
