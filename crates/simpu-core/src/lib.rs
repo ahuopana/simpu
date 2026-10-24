@@ -4,6 +4,7 @@
 //! crate can be tested on Linux CI.
 
 pub mod credentials;
+pub mod ext;
 pub mod hostkeys;
 pub mod import;
 pub mod jump;
@@ -11,6 +12,7 @@ pub mod manager;
 pub mod model;
 pub mod platform;
 pub mod plugin;
+pub mod redact;
 pub mod sftp;
 pub mod ssh;
 pub mod store;

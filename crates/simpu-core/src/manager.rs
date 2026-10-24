@@ -3,8 +3,10 @@
 
 use crate::credentials::Credentials;
 use crate::credentials::{CredentialError, Secret};
+use crate::ext::{ExtensionHost, SessionMeta, SessionObserver};
 use crate::hostkeys::KnownHosts;
 use crate::model::{Folder, Node, Protocol, Tree};
+use crate::redact::{SecretSet, StreamRedactor};
 use crate::sftp::{Progress, Sftp};
 use crate::ssh::{
     plan_hops, HopAuth, HostKeyPolicy, HostKeyPrompt, PlanError, Shell, ShellEvent, SshSession,
@@ -82,6 +84,26 @@ struct Active {
     sftp: Arc<tokio::sync::Mutex<Option<Arc<Sftp>>>>,
 }
 
+/// Feeds redacted output to extensions; the UI gets the raw bytes separately.
+struct Tap {
+    meta: SessionMeta,
+    redactor: StreamRedactor,
+    host: Arc<ExtensionHost>,
+}
+
+impl Tap {
+    fn data(&mut self, raw: &[u8]) {
+        let r = self.redactor.feed(raw);
+        self.host.output(&self.meta, &r);
+    }
+
+    fn finish(&mut self) {
+        let r = self.redactor.flush();
+        self.host.output(&self.meta, &r);
+        self.host.closed(&self.meta);
+    }
+}
+
 pub struct Manager<E: Events> {
     events: Arc<E>,
     tree: Mutex<Tree>,
@@ -93,6 +115,8 @@ pub struct Manager<E: Events> {
     prompts: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
     secret_prompts: Mutex<HashMap<String, oneshot::Sender<Option<String>>>>,
     next_id: AtomicU64,
+    secrets: SecretSet,
+    extensions: Arc<ExtensionHost>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -118,7 +142,14 @@ impl<E: Events> Manager<E> {
             prompts: Arc::new(Mutex::new(HashMap::new())),
             secret_prompts: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(0),
+            secrets: SecretSet::default(),
+            extensions: Arc::new(ExtensionHost::default()),
         })
+    }
+
+    /// Register an extension that observes (redacted) session output.
+    pub fn register_observer(&self, o: Arc<dyn SessionObserver>) {
+        self.extensions.register(o);
     }
 
     pub fn tree(&self) -> Tree {
@@ -169,7 +200,11 @@ impl<E: Events> Manager<E> {
         info.prompt_id = Uuid::new_v4().to_string();
         lock(&self.secret_prompts).insert(info.prompt_id.clone(), tx);
         self.events.credential_prompt(info);
-        rx.await.ok().flatten().map(Secret::new)
+        let secret = rx.await.ok().flatten().map(Secret::new);
+        if let Some(s) = &secret {
+            self.secrets.add(s);
+        }
+        secret
     }
 
     async fn ask_password(&self, hop: &crate::ssh::Hop) -> Result<Secret, String> {
@@ -273,6 +308,16 @@ impl<E: Events> Manager<E> {
         let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
         let events = self.events.clone();
         let sid = session_id.to_string();
+        let mut tap = Tap {
+            meta: SessionMeta {
+                id: sid.clone(),
+                connection: conn.name.clone(),
+                host: conn.host.clone(),
+                username: conn.username.clone(),
+            },
+            redactor: StreamRedactor::new(self.secrets.clone()),
+            host: self.extensions.clone(),
+        };
 
         if conn.protocol == Protocol::Telnet {
             let mut t =
@@ -284,13 +329,13 @@ impl<E: Events> Manager<E> {
                 loop {
                     tokio::select! {
                         ev = t.next() => match ev {
-                            TelnetEvent::Data(d) => events.data(&sid, d),
-                            TelnetEvent::Closed => { events.closed(&sid, "connection closed".into()); break; }
+                            TelnetEvent::Data(d) => { tap.data(&d); events.data(&sid, d) }
+                            TelnetEvent::Closed => { tap.finish(); events.closed(&sid, "connection closed".into()); break; }
                         },
                         cmd = rx.recv() => match cmd {
                             Some(Cmd::Write(b)) => { let _ = w.write(&b).await; }
                             Some(Cmd::Resize(c, r)) => { let _ = w.resize(c as u16, r as u16).await; }
-                            Some(Cmd::Close) | None => break,
+                            Some(Cmd::Close) | None => { tap.finish(); break }
                         },
                     }
                 }
@@ -314,6 +359,18 @@ impl<E: Events> Manager<E> {
                 hop.auth = HopAuth::Password(self.ask_password(hop).await?);
             }
         }
+        for hop in &hops {
+            match &hop.auth {
+                HopAuth::Password(p) => self.secrets.add(p),
+                HopAuth::Key { pem, passphrase } => {
+                    self.secrets.add(pem);
+                    if let Some(p) = passphrase {
+                        self.secrets.add(p);
+                    }
+                }
+                HopAuth::None => {}
+            }
+        }
         let session = SshSession::connect(&hops, self.known.clone(), self.policy())
             .await
             .map_err(|e| e.to_string())?;
@@ -327,14 +384,14 @@ impl<E: Events> Manager<E> {
             loop {
                 tokio::select! {
                     ev = shell.next() => match ev {
-                        ShellEvent::Data(d) => events.data(&sid, d),
-                        ShellEvent::Exit(code) => { events.closed(&sid, format!("exit status {code}")); break; }
-                        ShellEvent::Closed => { events.closed(&sid, "connection closed".into()); break; }
+                        ShellEvent::Data(d) => { tap.data(&d); events.data(&sid, d) }
+                        ShellEvent::Exit(code) => { tap.finish(); events.closed(&sid, format!("exit status {code}")); break; }
+                        ShellEvent::Closed => { tap.finish(); events.closed(&sid, "connection closed".into()); break; }
                     },
                     cmd = rx.recv() => match cmd {
                         Some(Cmd::Write(b)) => { let _ = shell.write(&b).await; }
                         Some(Cmd::Resize(c, r)) => { let _ = shell.resize(c, r).await; }
-                        Some(Cmd::Close) | None => break,
+                        Some(Cmd::Close) | None => { tap.finish(); break }
                     },
                 }
             }

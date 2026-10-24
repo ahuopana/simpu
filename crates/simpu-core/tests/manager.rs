@@ -312,3 +312,76 @@ async fn imports_ssh_config_into_a_folder() {
         .import_ssh_config(&s.dir.path().join("missing"))
         .is_err());
 }
+
+#[derive(Default)]
+struct Spy {
+    text: Mutex<String>,
+    closed: Mutex<u32>,
+}
+
+impl simpu_core::ext::SessionObserver for Spy {
+    fn output(&self, _m: &simpu_core::ext::SessionMeta, b: &[u8]) {
+        self.text
+            .lock()
+            .unwrap()
+            .push_str(&String::from_utf8_lossy(b));
+    }
+    fn closed(&self, _m: &simpu_core::ext::SessionMeta) {
+        *self.closed.lock().unwrap() += 1;
+    }
+}
+
+#[tokio::test]
+async fn extensions_see_output_with_known_passwords_masked_but_the_terminal_does_not() {
+    let server = TestServer::start("srv", "alice", "s3cretpw").await;
+    let mut conn = Connection::new("srv", Protocol::Ssh, "127.0.0.1", "alice");
+    conn.port = Some(server.port);
+    conn.secret = secret("pw");
+    let dir = tempfile::tempdir().unwrap();
+    let mut creds = Credentials::default();
+    creds.register(Box::new(StaticProvider::new(&[("pw", "s3cretpw")])));
+    let events = Arc::new(Fake::default());
+    let mgr = Arc::new(Manager::new(events.clone(), dir.path().to_path_buf(), creds).unwrap());
+    mgr.save_tree(Tree {
+        nodes: vec![Node::Connection(conn.clone())],
+    })
+    .unwrap();
+    let spy = Arc::new(Spy::default());
+    mgr.register_observer(spy.clone());
+
+    let (m, ev) = (mgr.clone(), events.clone());
+    let hk = tokio::spawn(async move {
+        until("prompt", || !ev.prompts.lock().unwrap().is_empty()).await;
+        let id = ev.prompts.lock().unwrap().remove(0).prompt_id;
+        m.answer_host_key(&id, true);
+    });
+    mgr.open("s1", &conn.id.to_string(), 80, 24).await.unwrap();
+    hk.await.unwrap();
+    until("banner", || {
+        events.data.lock().unwrap().contains("pty 80x24")
+    })
+    .await;
+
+    mgr.write("s1", b"my s3cretpw here\n".to_vec());
+    until("echo on terminal", || {
+        events
+            .data
+            .lock()
+            .unwrap()
+            .contains("echo:my s3cretpw here")
+    })
+    .await;
+    mgr.write("s1", b"exit\n".to_vec());
+    until("closed", || *spy.closed.lock().unwrap() == 1).await;
+
+    let seen = spy.text.lock().unwrap().clone();
+    assert!(seen.contains("echo:my ⟦secret⟧ here"), "{seen}");
+    assert!(
+        !seen.contains("s3cretpw"),
+        "extension must never see the password: {seen}"
+    );
+    assert!(
+        events.data.lock().unwrap().contains("s3cretpw"),
+        "terminal output is unchanged"
+    );
+}
