@@ -194,3 +194,76 @@ test("import ssh config adds a folder of hosts", async ({ page }) => {
   await expect(page.getByTestId("conn-imported-a")).toBeVisible();
   await expect(page.getByTestId("tree")).toContainText("Imported from ssh_config");
 });
+
+test.describe("log capture", () => {
+  const preview = (page: Page) => page.getByTestId("export-preview").inputValue();
+
+  async function recordSession(page: Page) {
+    await open(page, "db");
+    await expect.poll(() => screen(page)).toContain("Connected");
+    await page.getByTestId("rec").click();
+    await expect(page.locator(".leaf.recording")).toHaveCount(1);
+    await type(page, "\r"); // an empty line so the log starts at a prompt
+    await expect.poll(() => screen(page)).toContain("ran: ");
+    await type(page, "uname -a\r");
+    await expect.poll(() => screen(page)).toContain("ran: uname -a");
+    await type(page, "ssh db.example.com\r");
+    await expect.poll(() => screen(page)).toContain("ran: ssh db.example.com");
+    await type(page, "echo hi root\r");
+    await expect.poll(() => screen(page)).toContain("ran: echo hi root");
+  }
+
+  test("record, stop, export everything or the last command", async ({ page }) => {
+    await recordSession(page);
+    await page.getByTestId("rec").click(); // stop
+    await expect(page.locator(".leaf.recording")).toHaveCount(0);
+    await page.getByTestId("export-log").click();
+    await expect.poll(() => preview(page)).toContain("ran: uname -a");
+
+    await page.getByTestId("scope-last").check();
+    await expect.poll(() => preview(page)).not.toContain("uname");
+    expect(await preview(page)).toContain("echo hi root");
+    await page.getByTestId("last-n").fill("3");
+    await expect.poll(() => preview(page)).toContain("uname -a");
+  });
+
+  test("anonymize usernames and hosts with preview, custom regex and validation", async ({ page }) => {
+    await recordSession(page);
+    await page.getByTestId("export-log").click();
+    await page.getByTestId("anon-users").check();
+    await page.getByTestId("anon-hosts").check();
+    await expect.poll(() => preview(page)).toContain("ssh host1");
+    expect(await preview(page)).not.toContain("db.example.com");
+    expect(await preview(page)).toContain("echo hi user1");
+    await expect(page.getByTestId("export-map")).toContainText("db.example.com → host1");
+
+    await page.getByTestId("anon-custom").fill("hi (root");
+    await expect(page.getByTestId("regex-errors")).not.toBeEmpty();
+    await page.getByTestId("anon-custom").fill("hi \\w+");
+    await expect(page.getByTestId("regex-errors")).toBeEmpty();
+    await expect.poll(() => preview(page)).toContain("echo <rule1-1>");
+  });
+
+  test("copy to clipboard and save to file export the anonymized text", async ({ page }) => {
+    await recordSession(page);
+    await page.getByTestId("export-log").click();
+    await page.getByTestId("anon-users").check();
+    await expect.poll(() => preview(page)).toContain("user1");
+    await page.getByTestId("export-copy").click();
+    await expect(page.getByTestId("toasts")).toContainText("Copied");
+    await page.getByTestId("export-save").click();
+    await expect(page.getByTestId("toasts")).toContainText("Saved /tmp/session.log");
+    const b = await page.evaluate(() => (window as any).__simpu.backend);
+    expect(b.clipboard).toContain("user1");
+    expect(b.clipboard).not.toContain("root@");
+    expect(b.savedFiles).toHaveLength(1);
+    expect(b.savedFiles[0].text).toBe(b.clipboard);
+  });
+
+  test("exporting without recording shows a clear message", async ({ page }) => {
+    await open(page, "db");
+    await expect.poll(() => screen(page)).toContain("Connected");
+    await page.getByTestId("export-log").click();
+    await expect(page.getByTestId("export-note")).toContainText("no capture");
+  });
+});

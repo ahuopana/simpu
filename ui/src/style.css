@@ -50,3 +50,13 @@ html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:
 #modal input, #modal select { background:var(--bg); color:var(--fg); border:1px solid #444; border-radius:4px; padding:4px; }
 #modal .err { grid-column:2; color:#f66; font-size:11px; }
 #modal .buttons { grid-column:1/-1; display:flex; justify-content:flex-end; gap:8px; margin-top:6px; }
+
+#toolbar .sep { width:1px; background:#444; margin:0 4px; }
+#rec.on { color:#ff5c5c; border-color:#ff5c5c; }
+.leaf.recording::before { content:"● REC"; position:absolute; left:8px; top:4px; z-index:5; color:#ff5c5c; font-size:11px; }
+#modal .wide { min-width:640px; max-width:90vw; }
+#modal .wide form { min-width:0; }
+#modal textarea { background:var(--bg); color:var(--fg); border:1px solid #444; border-radius:4px; padding:4px; font:12px monospace; width:100%; }
+#modal .preview { height:200px; }
+#modal .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin:4px 0; }
+#modal .map { font:11px monospace; color:var(--muted); max-height:80px; overflow:auto; }

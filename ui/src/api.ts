@@ -54,6 +54,34 @@ export interface TransferProgress {
   error?: string;
 }
 
+export interface AnonymizeRequest {
+  usernames: boolean;
+  hostnames: boolean;
+  secrets: boolean;
+  /** One regular expression per entry. */
+  custom: string[];
+}
+
+export interface ExportRequest {
+  scope: "all" | "last";
+  lastN: number;
+  stripEscapes: boolean;
+  promptRegex?: string;
+  anonymize?: AnonymizeRequest;
+}
+
+export interface ExportResponse {
+  text: string;
+  /** [original, pseudonym] pairs. */
+  mapping: [string, string][];
+  fallbackToLines: boolean;
+}
+
+export interface CaptureStatus {
+  recording: boolean;
+  bytes: number;
+}
+
 export type Unlisten = () => void;
 
 export interface Backend {
@@ -76,6 +104,17 @@ export interface Backend {
   onCredentialPrompt(cb: (p: CredentialPrompt) => void): Unlisten;
   /** `null` cancels the connection attempt. */
   answerCredential(promptId: string, secret: string | null): Promise<void>;
+
+  captureStart(sessionId: string): Promise<void>;
+  captureStop(sessionId: string): Promise<void>;
+  captureStatus(sessionId: string): Promise<CaptureStatus>;
+  capturePreview(sessionId: string, request: ExportRequest): Promise<ExportResponse>;
+  captureSave(sessionId: string, request: ExportRequest, path: string): Promise<void>;
+  /** Error message if `pattern` is not a valid regular expression, otherwise null. */
+  captureRegexError(pattern: string): Promise<string | null>;
+  /** Ask the user where to save a file; null if cancelled. */
+  pickSavePath(defaultName: string): Promise<string | null>;
+  copyText(text: string): Promise<void>;
 
   sftpList(sessionId: string, path: string): Promise<RemoteEntry[]>;
   upload(sessionId: string, localPath: string, remoteDir: string): Promise<string>;

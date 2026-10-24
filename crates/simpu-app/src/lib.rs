@@ -1,6 +1,8 @@
 //! Thin Tauri shell around `simpu_core::manager::Manager`. Keep logic in core.
 
 use serde::Serialize;
+use simpu_capture::api::{ExportRequest, ExportResponse, KnownNames, StatusResponse};
+use simpu_capture::Capture;
 use simpu_core::credentials::Credentials;
 use simpu_core::manager::{
     CredentialPromptInfo, Events, Manager, PromptInfo, RemoteEntry, TransferInfo,
@@ -36,6 +38,7 @@ impl Events for TauriEvents {
 }
 
 type App = Arc<Manager<TauriEvents>>;
+type Cap = Arc<Capture>;
 
 #[tauri::command]
 fn tree_load(app: State<'_, App>) -> Vec<Node> {
@@ -69,8 +72,69 @@ fn session_resize(app: State<'_, App>, session_id: String, cols: u32, rows: u32)
 }
 
 #[tauri::command]
-fn session_close(app: State<'_, App>, session_id: String) {
+fn session_close(app: State<'_, App>, cap: State<'_, Cap>, session_id: String) {
     app.close(&session_id);
+    cap.discard(&session_id);
+}
+
+#[tauri::command]
+fn capture_start(cap: State<'_, Cap>, session_id: String) {
+    cap.start(&session_id);
+}
+
+#[tauri::command]
+fn capture_stop(cap: State<'_, Cap>, session_id: String) {
+    cap.stop(&session_id);
+}
+
+#[tauri::command]
+fn capture_status(cap: State<'_, Cap>, session_id: String) -> StatusResponse {
+    cap.status_response(&session_id)
+}
+
+/// Usernames and hosts from the connection tree, so they are anonymized everywhere.
+fn known_names(app: &App) -> KnownNames {
+    let tree = app.tree();
+    let conns = tree.connections();
+    KnownNames {
+        usernames: conns
+            .iter()
+            .map(|c| c.username.clone())
+            .filter(|u| !u.is_empty())
+            .collect(),
+        hostnames: conns.iter().map(|c| c.host.clone()).collect(),
+    }
+}
+
+#[tauri::command]
+fn capture_preview(
+    app: State<'_, App>,
+    cap: State<'_, Cap>,
+    session_id: String,
+    request: ExportRequest,
+) -> Result<ExportResponse, String> {
+    cap.export_request(&session_id, request, &known_names(&app))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn capture_save(
+    app: State<'_, App>,
+    cap: State<'_, Cap>,
+    session_id: String,
+    request: ExportRequest,
+    path: String,
+) -> Result<(), String> {
+    let r = cap
+        .export_request(&session_id, request, &known_names(&app))
+        .map_err(|e| e.to_string())?;
+    simpu_capture::api::write_atomic(std::path::Path::new(&path), &r.text)
+        .map_err(|e| format!("{path}: {e}"))
+}
+
+#[tauri::command]
+fn capture_regex_error(pattern: String) -> Option<String> {
+    simpu_capture::api::regex_error(&pattern)
 }
 
 #[tauri::command]
@@ -139,6 +203,12 @@ pub fn run() {
             session_write,
             session_resize,
             session_close,
+            capture_start,
+            capture_stop,
+            capture_status,
+            capture_preview,
+            capture_save,
+            capture_regex_error,
             hostkey_answer,
             credential_answer,
             import_ssh_config,

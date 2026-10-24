@@ -1,7 +1,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import type { ConnectionDto, NodeDto } from "./api";
+import type { ConnectionDto, ExportRequest, NodeDto } from "./api";
 import { backend, inTauri } from "./backend";
 import { closeLeaf, type Dir, leaves, newTab, type Pane, splitLeaf, type Tab } from "./layout";
 import "./style.css";
@@ -152,6 +152,134 @@ function openEditor(existing?: ConnectionDto) {
   f("name").focus();
 }
 
+// ---------- log capture ----------
+const recording = new Set<string>(); // leaf ids
+
+function focusedView(): View | undefined {
+  const t = currentTab();
+  return t ? views.get(t.focus) : undefined;
+}
+
+function refreshRecUi() {
+  const v = focusedView();
+  const on = !!v && recording.has(v.leafId);
+  $("rec").classList.toggle("on", on);
+  $("rec").textContent = on ? "■ Stop recording" : "● Record";
+  for (const [id, view] of views) view.el.classList.toggle("recording", recording.has(id));
+}
+
+async function toggleRecording() {
+  const v = focusedView();
+  if (!v) return;
+  if (recording.has(v.leafId)) {
+    await backend.captureStop(v.sessionId);
+    recording.delete(v.leafId);
+    toast("Recording stopped. Use “Export log…” to save or copy it.");
+  } else {
+    await backend.captureStart(v.sessionId);
+    recording.add(v.leafId);
+  }
+  refreshRecUi();
+}
+
+function openExport() {
+  const v = focusedView();
+  if (!v) return;
+  const m = $("modal");
+  m.hidden = false;
+  m.innerHTML = `<div class="box wide" role="dialog"><form data-testid="export-dialog" novalidate>
+    <h3>Export log — ${esc(v.conn.name)}</h3>
+    <div class="row">
+      <label><input type="radio" name="scope" value="all" checked data-testid="scope-all" /> Everything</label>
+      <label><input type="radio" name="scope" value="last" data-testid="scope-last" /> Last
+        <input name="lastN" type="number" min="1" value="1" style="width:60px" data-testid="last-n" /> command(s)</label>
+      <label><input type="checkbox" name="strip" checked data-testid="opt-strip" /> Strip colors/escapes</label>
+    </div>
+    <div class="row">Anonymize:
+      <label><input type="checkbox" name="usernames" data-testid="anon-users" /> usernames</label>
+      <label><input type="checkbox" name="hostnames" data-testid="anon-hosts" /> hostnames &amp; IPs</label>
+      <label><input type="checkbox" name="secrets" data-testid="anon-secrets" /> passwords &amp; keys</label>
+    </div>
+    <div>Custom regex (one per line)
+      <textarea name="custom" rows="2" data-testid="anon-custom" placeholder="e.g. ACME-\d+"></textarea>
+      <div class="err" data-testid="regex-errors"></div></div>
+    <details><summary>Prompt pattern (advanced)</summary>
+      <input name="prompt" style="width:100%" data-testid="prompt-regex" placeholder="default detects bash, PowerShell, Cisco…" /></details>
+    <div class="note" data-testid="export-note" style="color:var(--warn)"></div>
+    <textarea class="preview" readonly data-testid="export-preview"></textarea>
+    <div class="map" data-testid="export-map"></div>
+    <div class="buttons"><button type="button" data-testid="export-copy">Copy to clipboard</button>
+      <button type="button" data-testid="export-save">Save to file…</button>
+      <button type="button" data-testid="export-close">Close</button></div></form></div>`;
+  const form = m.querySelector("form")!;
+  const f = (n: string) => form.elements.namedItem(n) as HTMLInputElement;
+  const q = (id: string) => m.querySelector<HTMLElement>(`[data-testid="${id}"]`)!;
+
+  const request = (): ExportRequest => {
+    const anyAnon = f("usernames").checked || f("hostnames").checked || f("secrets").checked;
+    const custom = (form.elements.namedItem("custom") as HTMLTextAreaElement).value.split("\n").map((l) => l.trim()).filter(Boolean);
+    return {
+      scope: (form.elements.namedItem("scope") as unknown as RadioNodeList).value === "last" ? "last" : "all",
+      lastN: Math.max(1, Number(f("lastN").value) || 1),
+      stripEscapes: f("strip").checked,
+      ...(f("prompt").value.trim() ? { promptRegex: f("prompt").value.trim() } : {}),
+      ...(anyAnon || custom.length
+        ? { anonymize: { usernames: f("usernames").checked, hostnames: f("hostnames").checked, secrets: f("secrets").checked, custom } }
+        : {}),
+    };
+  };
+
+  let seq = 0;
+  const refresh = async () => {
+    const mine = ++seq;
+    const req = request();
+    const errs: string[] = [];
+    for (const p of req.anonymize?.custom ?? []) {
+      const e = await backend.captureRegexError(p);
+      if (e) errs.push(`${p}: ${e}`);
+    }
+    if (req.promptRegex) {
+      const e = await backend.captureRegexError(req.promptRegex);
+      if (e) errs.push(`prompt pattern: ${e}`);
+    }
+    q("regex-errors").textContent = errs.join("\n");
+    if (errs.length) return;
+    try {
+      const r = await backend.capturePreview(v.sessionId, req);
+      if (mine !== seq) return;
+      (q("export-preview") as HTMLTextAreaElement).value = r.text;
+      q("export-note").textContent = r.fallbackToLines ? "No shell prompt recognised; showing the last lines instead." : "";
+      q("export-map").textContent = r.mapping.map(([a, b]) => `${a} → ${b}`).join("\n");
+    } catch (e) {
+      (q("export-preview") as HTMLTextAreaElement).value = "";
+      q("export-note").textContent = String(e instanceof Error ? e.message : e);
+    }
+  };
+  form.addEventListener("input", () => void refresh());
+  form.addEventListener("change", () => void refresh());
+  const close = () => {
+    m.hidden = true;
+    m.replaceChildren();
+  };
+  q("export-close").addEventListener("click", close);
+  q("export-copy").addEventListener("click", () => {
+    void backend.copyText((q("export-preview") as HTMLTextAreaElement).value).then(() => toast("Copied to clipboard"));
+  });
+  q("export-save").addEventListener("click", () => {
+    void (async () => {
+      const path = await backend.pickSavePath(`${v.conn.name}.log`);
+      if (!path) return;
+      try {
+        await backend.captureSave(v.sessionId, request(), path);
+        toast(`Saved ${path}`);
+      } catch (e) {
+        toast(`Save failed: ${String(e)}`, true);
+      }
+    })();
+  });
+  void refresh();
+}
+
 // ---------- sessions / views ----------
 function createView(conn: ConnectionDto): View {
   const leafId = uid("leaf");
@@ -229,6 +357,7 @@ function focusLeaf(leafId: string) {
 }
 
 function markFocus() {
+  queueMicrotask(refreshRecUi);
   const t = currentTab();
   for (const l of document.querySelectorAll<HTMLElement>(".leaf")) l.classList.remove("focus");
   if (t) views.get(t.focus)?.el.classList.add("focus");
@@ -275,6 +404,7 @@ function closeTab(id: string) {
 }
 
 function disposeView(v: View) {
+  recording.delete(v.leafId);
   v.unlisten.forEach((u) => u());
   void backend.closeSession(v.sessionId);
   v.term.dispose();
@@ -476,6 +606,8 @@ backend.onCredentialPrompt((p) => {
 $("split-row").addEventListener("click", () => split("row"));
 $("split-col").addEventListener("click", () => split("col"));
 $("close-pane").addEventListener("click", closePane);
+$("rec").addEventListener("click", () => void toggleRecording());
+$("export-log").addEventListener("click", openExport);
 $("search").addEventListener("input", renderTree);
 $("new-conn").addEventListener("click", () => openEditor());
 $("import-ssh").addEventListener("click", () => {

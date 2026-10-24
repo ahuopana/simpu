@@ -3,6 +3,7 @@
 
 pub mod anonymize;
 pub mod ansi;
+pub mod api;
 pub mod prompt;
 
 use simpu_core::ext::{SessionMeta, SessionObserver};

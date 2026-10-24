@@ -1,5 +1,5 @@
 // In-memory backend used by `vite dev` in a plain browser and by the e2e tests.
-import type { Backend, ConnectionDto, CredentialPrompt, HostKeyPrompt, NodeDto, RemoteEntry, TransferProgress } from "./api";
+import type { Backend, CaptureStatus, ExportRequest, ExportResponse, ConnectionDto, CredentialPrompt, HostKeyPrompt, NodeDto, RemoteEntry, TransferProgress } from "./api";
 
 const sample: NodeDto[] = [
   {
@@ -63,6 +63,77 @@ export class MockBackend implements Backend {
     this.tree = structuredClone(nodes);
   }
 
+  // ----- capture (simplified stand-in for simpu-capture; the real logic is unit-tested in Rust) -----
+  private logs = new Map<string, { recording: boolean; text: string; user: string; host: string }>();
+  savedFiles: { path: string; text: string }[] = [];
+  clipboard = "";
+  nextSavePath: string | null = "/tmp/session.log";
+
+  private tap(sessionId: string, s: string) {
+    const l = this.logs.get(sessionId);
+    if (l?.recording) l.text += s;
+  }
+  async captureStart(sessionId: string) {
+    const c = this.sessions.get(sessionId)?.conn;
+    this.logs.set(sessionId, { recording: true, text: "", user: c?.username ?? "", host: c?.host ?? "" });
+  }
+  async captureStop(sessionId: string) {
+    const l = this.logs.get(sessionId);
+    if (l) l.recording = false;
+  }
+  async captureStatus(sessionId: string): Promise<CaptureStatus> {
+    const l = this.logs.get(sessionId);
+    return { recording: l?.recording ?? false, bytes: l?.text.length ?? 0 };
+  }
+  async capturePreview(sessionId: string, req: ExportRequest): Promise<ExportResponse> {
+    const l = this.logs.get(sessionId);
+    if (!l) throw new Error(`no capture for session ${sessionId}`);
+    let text = l.text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "");
+    let fallback = false;
+    if (req.scope === "last") {
+      const blocks = text.split(/^(?=\S*[$#] )/m).filter((b) => /^\S*[$#] \S/.test(b));
+      fallback = blocks.length === 0;
+      text = (fallback ? text.trimEnd().split("\n").slice(-req.lastN) : blocks.slice(-req.lastN)).join(fallback ? "\n" : "").trimEnd();
+    }
+    const mapping: [string, string][] = [];
+    const a = req.anonymize;
+    if (a) {
+      const swap = (orig: string, pseudo: string) => {
+        if (orig && text.includes(orig)) {
+          text = text.split(orig).join(pseudo);
+          mapping.push([orig, pseudo]);
+        }
+      };
+      if (a.usernames) swap(l.user, "user1");
+      if (a.hostnames) swap(l.host, "host1");
+      if (a.secrets) text = text.replace(/(password\s*[=:]\s*)\S+/gi, "$1******");
+      a.custom.filter(Boolean).forEach((p, i) => {
+        text = text.replace(new RegExp(p, "g"), (m) => {
+          mapping.push([m, `<rule${i + 1}-1>`]);
+          return `<rule${i + 1}-1>`;
+        });
+      });
+    }
+    return { text, mapping, fallbackToLines: fallback };
+  }
+  async captureSave(sessionId: string, req: ExportRequest, path: string) {
+    this.savedFiles.push({ path, text: (await this.capturePreview(sessionId, req)).text });
+  }
+  async captureRegexError(pattern: string) {
+    try {
+      new RegExp(pattern);
+      return null;
+    } catch (e) {
+      return String(e instanceof Error ? e.message : e);
+    }
+  }
+  async pickSavePath() {
+    return this.nextSavePath;
+  }
+  async copyText(text: string) {
+    this.clipboard = text;
+  }
+
   async importSshConfig() {
     this.tree.push({
       type: "folder",
@@ -82,6 +153,7 @@ export class MockBackend implements Backend {
   }
 
   private out(id: string, s: string) {
+    this.tap(id, s);
     this.em(this.data, id).emit(new TextEncoder().encode(s));
   }
 
