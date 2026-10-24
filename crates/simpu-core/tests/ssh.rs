@@ -275,6 +275,7 @@ fn quick_keepalive() -> simpu_core::ssh::ConnectOptions {
     simpu_core::ssh::ConnectOptions {
         keepalive_interval: Some(std::time::Duration::from_millis(150)),
         keepalive_max: 2,
+        connect_timeout: std::time::Duration::from_secs(5),
     }
 }
 

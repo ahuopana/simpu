@@ -16,6 +16,7 @@ use thiserror::Error;
 use tokio::sync::watch;
 
 /// How to authenticate to one hop.
+#[derive(Clone)]
 pub enum HopAuth {
     /// "none" authentication (servers that allow it).
     None,
@@ -28,6 +29,7 @@ pub enum HopAuth {
 }
 
 /// One hop of a connection: a jump host or the final target.
+#[derive(Clone)]
 pub struct Hop {
     pub name: String,
     pub host: String,
@@ -139,6 +141,8 @@ pub struct ConnectOptions {
     pub keepalive_interval: Option<Duration>,
     /// Give up after this many unanswered keepalives.
     pub keepalive_max: usize,
+    /// Abort establishing a connection (all hops, including authentication) after this long.
+    pub connect_timeout: Duration,
 }
 
 impl Default for ConnectOptions {
@@ -146,6 +150,7 @@ impl Default for ConnectOptions {
         Self {
             keepalive_interval: Some(Duration::from_secs(30)),
             keepalive_max: 3,
+            connect_timeout: Duration::from_secs(20),
         }
     }
 }
@@ -265,6 +270,44 @@ impl SshSession {
 
     /// Like [`connect`](Self::connect) with explicit transport options.
     pub async fn connect_with(
+        hops: &[Hop],
+        known: Arc<Mutex<KnownHosts>>,
+        policy: HostKeyPolicy,
+        opts: &ConnectOptions,
+    ) -> Result<Self, SshError> {
+        // The timeout does not run while the user is being asked about a host key.
+        let prompting = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted: HostKeyPolicy = {
+            let (inner, prompting) = (policy, prompting.clone());
+            Arc::new(move |p| {
+                let (inner, prompting) = (inner.clone(), prompting.clone());
+                Box::pin(async move {
+                    prompting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let answer = inner(p).await;
+                    prompting.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    answer
+                })
+            })
+        };
+        let fut = Self::connect_inner(hops, known, counted, opts);
+        tokio::pin!(fut);
+        loop {
+            tokio::select! {
+                r = &mut fut => return r,
+                () = tokio::time::sleep(opts.connect_timeout) => {
+                    if prompting.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                        return Err(SshError {
+                            index: hops.len().saturating_sub(1),
+                            name: hops.last().map(|h| h.name.clone()).unwrap_or_default(),
+                            kind: ErrorKind::Connect(format!("timed out after {}s", opts.connect_timeout.as_secs_f32())),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    async fn connect_inner(
         hops: &[Hop],
         known: Arc<Mutex<KnownHosts>>,
         policy: HostKeyPolicy,

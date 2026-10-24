@@ -41,7 +41,6 @@ struct Item {
 
 #[derive(Default)]
 struct Inner {
-    next: u32,
     items: HashMap<u32, Item>,
 }
 
@@ -65,14 +64,18 @@ impl ForwardManager {
     /// Start a forward. Failures (port in use, server refuses) are recorded in the
     /// returned info as `Failed`; they never affect the session.
     pub async fn start(&self, spec: Forward) -> ForwardInfo {
+        let id = lock(&self.inner).items.keys().max().map_or(1, |m| m + 1);
+        self.start_with_id(id, spec).await
+    }
+
+    /// Like [`start`](Self::start) with a caller-chosen id (stable across reconnects).
+    pub async fn start_with_id(&self, id: u32, spec: Forward) -> ForwardInfo {
         let connections = Arc::new(AtomicU64::new(0));
         let (state, task) = match self.launch(&spec, connections.clone()).await {
             Ok((port, task)) => (ForwardState::Listening { port }, task),
             Err(reason) => (ForwardState::Failed { reason }, None),
         };
         let mut g = lock(&self.inner);
-        g.next += 1;
-        let id = g.next;
         let info = ForwardInfo {
             id,
             spec: spec.clone(),

@@ -4,19 +4,22 @@
 use crate::credentials::Credentials;
 use crate::credentials::{CredentialError, Secret};
 use crate::ext::{ExtensionHost, SessionMeta, SessionObserver};
+use crate::forward::{ForwardInfo, ForwardManager, ForwardState};
 use crate::hostkeys::KnownHosts;
-use crate::model::{Folder, Node, Protocol, Tree};
+use crate::model::{Folder, Forward, Node, Protocol, ReconnectPolicy, Tree};
 use crate::redact::{SecretSet, StreamRedactor};
 use crate::sftp::{Progress, Sftp};
 use crate::ssh::{
-    plan_hops, HopAuth, HostKeyPolicy, HostKeyPrompt, PlanError, Shell, ShellEvent, SshSession,
+    plan_hops, ConnectOptions, ErrorKind, Hop, HopAuth, HostKeyPolicy, HostKeyPrompt, PlanError,
+    Shell, ShellEvent, SshError, SshSession,
 };
 use crate::telnet::{TelnetEvent, TelnetSession, TelnetWriter};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
@@ -28,6 +31,67 @@ pub trait Events: Send + Sync + 'static {
     /// Ask the user for a password for `hop` (no vault secret is configured).
     fn credential_prompt(&self, prompt: CredentialPromptInfo);
     fn progress(&self, p: TransferInfo);
+    /// Connection state changes (connected, reconnecting, lost, closed).
+    fn session_state(&self, _session: &str, _state: SessionState) {}
+    /// The set of forwards of a session changed (started, stopped, restored after reconnect).
+    fn forwards(&self, _session: &str, _list: Vec<ForwardInfo>) {}
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(
+    tag = "state",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SessionState {
+    Connecting,
+    Connected,
+    /// Waiting `next_in_secs` before attempt number `attempt`.
+    Reconnecting {
+        attempt: u32,
+        next_in_secs: u64,
+    },
+    /// Connection lost; waiting for the user to press Reconnect.
+    Lost {
+        reason: String,
+    },
+    Closed {
+        reason: String,
+    },
+}
+
+/// Backoff for automatic reconnects.
+#[derive(Debug, Clone)]
+pub struct ReconnectConfig {
+    pub base: Duration,
+    pub max: Duration,
+    /// Stop auto-retrying (and wait for the user) after this many failed attempts.
+    pub max_attempts: Option<u32>,
+}
+
+impl Default for ReconnectConfig {
+    fn default() -> Self {
+        Self {
+            base: Duration::from_secs(1),
+            max: Duration::from_secs(60),
+            max_attempts: None,
+        }
+    }
+}
+
+impl ReconnectConfig {
+    /// Delay before attempt number `attempt` (1-based): base, 2x, 4x ... capped at max.
+    pub fn delay(&self, attempt: u32) -> Duration {
+        let factor = 1u32
+            .checked_shl(attempt.saturating_sub(1).min(20))
+            .unwrap_or(u32::MAX);
+        self.base.saturating_mul(factor).min(self.max)
+    }
+}
+
+/// Errors that retrying cannot fix: they need the user.
+fn retryable(e: &SshError) -> bool {
+    matches!(e.kind, ErrorKind::Connect(_) | ErrorKind::Session(_))
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -76,12 +140,24 @@ enum Cmd {
     Write(Vec<u8>),
     Resize(u32, u32),
     Close,
+    Reconnect,
+}
+
+/// Per-session state shared between the manager API and the session's supervisor task.
+#[derive(Default)]
+struct Shared {
+    /// `None` for telnet and while disconnected.
+    ssh: Mutex<Option<Arc<SshSession>>>,
+    sftp: tokio::sync::Mutex<Option<Arc<Sftp>>>,
+    fwd: Mutex<Option<Arc<ForwardManager>>>,
+    /// Forwards that should run whenever the session is connected (saved + ad-hoc), with stable ids.
+    desired: Mutex<Vec<(u32, Forward)>>,
+    next_forward: AtomicU32,
 }
 
 struct Active {
     tx: mpsc::UnboundedSender<Cmd>,
-    ssh: Option<Arc<SshSession>>,
-    sftp: Arc<tokio::sync::Mutex<Option<Arc<Sftp>>>>,
+    shared: Arc<Shared>,
 }
 
 /// Feeds redacted output to extensions; the UI gets the raw bytes separately.
@@ -117,6 +193,8 @@ pub struct Manager<E: Events> {
     next_id: AtomicU64,
     secrets: SecretSet,
     extensions: Arc<ExtensionHost>,
+    connect_opts: Mutex<ConnectOptions>,
+    reconnect_cfg: Mutex<ReconnectConfig>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -144,7 +222,17 @@ impl<E: Events> Manager<E> {
             next_id: AtomicU64::new(0),
             secrets: SecretSet::default(),
             extensions: Arc::new(ExtensionHost::default()),
+            connect_opts: Mutex::new(ConnectOptions::default()),
+            reconnect_cfg: Mutex::new(ReconnectConfig::default()),
         })
+    }
+
+    pub fn set_connect_options(&self, o: ConnectOptions) {
+        *lock(&self.connect_opts) = o;
+    }
+
+    pub fn set_reconnect_config(&self, c: ReconnectConfig) {
+        *lock(&self.reconnect_cfg) = c;
     }
 
     /// Register an extension that observes (redacted) session output.
@@ -335,6 +423,7 @@ impl<E: Events> Manager<E> {
                         cmd = rx.recv() => match cmd {
                             Some(Cmd::Write(b)) => { let _ = w.write(&b).await; }
                             Some(Cmd::Resize(c, r)) => { let _ = w.resize(c as u16, r as u16).await; }
+                            Some(Cmd::Reconnect) => {}
                             Some(Cmd::Close) | None => { tap.finish(); break }
                         },
                     }
@@ -344,8 +433,7 @@ impl<E: Events> Manager<E> {
                 session_id.to_string(),
                 Active {
                     tx,
-                    ssh: None,
-                    sftp: Default::default(),
+                    shared: Arc::new(Shared::default()),
                 },
             );
             return Ok(());
@@ -371,40 +459,105 @@ impl<E: Events> Manager<E> {
                 HopAuth::None => {}
             }
         }
-        let session = SshSession::connect(&hops, self.known.clone(), self.policy())
+        self.events
+            .session_state(session_id, SessionState::Connecting);
+        let opts = lock(&self.connect_opts).clone();
+        let session = SshSession::connect_with(&hops, self.known.clone(), self.policy(), &opts)
             .await
             .map_err(|e| e.to_string())?;
         let _ = lock(&self.known).save(&self.known_path);
         let session = Arc::new(session);
-        let mut shell: Shell = session
-            .open_shell(cols, rows)
-            .await
-            .map_err(|e| e.to_string())?;
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    ev = shell.next() => match ev {
-                        ShellEvent::Data(d) => { tap.data(&d); events.data(&sid, d) }
-                        ShellEvent::Exit(code) => { tap.finish(); events.closed(&sid, format!("exit status {code}")); break; }
-                        ShellEvent::Closed => { tap.finish(); events.closed(&sid, "connection closed".into()); break; }
-                    },
-                    cmd = rx.recv() => match cmd {
-                        Some(Cmd::Write(b)) => { let _ = shell.write(&b).await; }
-                        Some(Cmd::Resize(c, r)) => { let _ = shell.resize(c, r).await; }
-                        Some(Cmd::Close) | None => { tap.finish(); break }
-                    },
-                }
+        let shell = if conn.no_shell {
+            None
+        } else {
+            Some(
+                session
+                    .open_shell(cols, rows)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
+        };
+        let shared = Arc::new(Shared::default());
+        {
+            let mut d = lock(&shared.desired);
+            for f in &conn.forwards {
+                let id = shared.next_forward.fetch_add(1, Ordering::SeqCst) + 1;
+                d.push((id, f.clone()));
             }
-        });
-        lock(&self.sessions).insert(
-            session_id.to_string(),
-            Active {
-                tx,
-                ssh: Some(session),
-                sftp: Default::default(),
-            },
-        );
+        }
+        let mut sup = Supervisor {
+            events,
+            sid,
+            tap,
+            rx,
+            shared: shared.clone(),
+            hops,
+            known: self.known.clone(),
+            known_path: self.known_path.clone(),
+            policy: self.policy(),
+            opts,
+            rc: lock(&self.reconnect_cfg).clone(),
+            mode: conn.effective_reconnect(),
+            no_shell: conn.no_shell,
+            cols,
+            rows,
+            session: session.clone(),
+            shell,
+        };
+        sup.install(session, false).await;
+        lock(&self.sessions).insert(session_id.to_string(), Active { tx, shared });
+        tokio::spawn(sup.run());
         Ok(())
+    }
+
+    /// Ask a lost session to reconnect now (also skips a pending auto-reconnect delay).
+    pub fn reconnect(&self, session: &str) {
+        self.send(session, Cmd::Reconnect);
+    }
+
+    fn shared(&self, session: &str) -> Result<Arc<Shared>, String> {
+        lock(&self.sessions)
+            .get(session)
+            .map(|a| a.shared.clone())
+            .ok_or_else(|| "no such session".to_string())
+    }
+
+    /// Add a forward to a live session (kept for reconnects). Failures show up as a `Failed` state.
+    pub async fn forward_add(&self, session: &str, spec: Forward) -> Result<ForwardInfo, String> {
+        spec.validate()?;
+        let shared = self.shared(session)?;
+        let id = shared.next_forward.fetch_add(1, Ordering::SeqCst) + 1;
+        lock(&shared.desired).push((id, spec.clone()));
+        let fm = lock(&shared.fwd).clone();
+        let info = match fm {
+            Some(fm) => fm.start_with_id(id, spec).await,
+            None => ForwardInfo {
+                id,
+                spec,
+                state: ForwardState::Failed {
+                    reason: "not connected".into(),
+                },
+                connections: 0,
+            },
+        };
+        self.events.forwards(session, forward_list(&shared));
+        Ok(info)
+    }
+
+    pub async fn forward_stop(&self, session: &str, id: u32) -> Result<(), String> {
+        let shared = self.shared(session)?;
+        lock(&shared.desired).retain(|(i, _)| *i != id);
+        let fm = lock(&shared.fwd).clone();
+        if let Some(fm) = fm {
+            fm.stop(id).await;
+        }
+        self.events.forwards(session, forward_list(&shared));
+        Ok(())
+    }
+
+    pub fn forward_list(&self, session: &str) -> Result<Vec<ForwardInfo>, String> {
+        let shared = self.shared(session)?;
+        Ok(forward_list(&shared))
     }
 
     fn send(&self, session: &str, cmd: Cmd) {
@@ -428,15 +581,11 @@ impl<E: Events> Manager<E> {
     }
 
     async fn sftp(&self, session: &str) -> Result<Arc<Sftp>, String> {
-        let (ssh, cell) = {
-            let s = lock(&self.sessions);
-            let a = s.get(session).ok_or("no such session")?;
-            (
-                a.ssh.clone().ok_or("file transfer needs an SSH session")?,
-                a.sftp.clone(),
-            )
-        };
-        let mut guard = cell.lock().await;
+        let shared = self.shared(session)?;
+        let ssh = lock(&shared.ssh)
+            .clone()
+            .ok_or("not connected (file transfer needs a live SSH session)")?;
+        let mut guard = shared.sftp.lock().await;
         if let Some(s) = guard.as_ref() {
             return Ok(s.clone());
         }
@@ -476,10 +625,7 @@ impl<E: Events> Manager<E> {
         let events = self.events.clone();
         let tid = transfer_id.clone();
         let sess = session.to_string();
-        let this_sftp = {
-            let s = lock(&self.sessions);
-            s.get(&sess).map(|a| (a.ssh.clone(), a.sftp.clone()))
-        };
+        let this_sftp = lock(&self.sessions).get(&sess).map(|a| a.shared.clone());
         tokio::spawn(async move {
             let fail = |e: String| {
                 events.progress(TransferInfo {
@@ -490,11 +636,14 @@ impl<E: Events> Manager<E> {
                     error: Some(e),
                 })
             };
-            let Some((Some(ssh), cell)) = this_sftp else {
-                return fail("file transfer needs an SSH session".into());
+            let Some(shared) = this_sftp else {
+                return fail("no such session".into());
+            };
+            let Some(ssh) = lock(&shared.ssh).clone() else {
+                return fail("not connected (file transfer needs a live SSH session)".into());
             };
             let sftp = {
-                let mut g = cell.lock().await;
+                let mut g = shared.sftp.lock().await;
                 match g.as_ref() {
                     Some(s) => s.clone(),
                     None => match ssh.open_sftp().await {
@@ -571,5 +720,316 @@ impl<E: Events> Manager<E> {
         let name = remote.rsplit('/').next().unwrap_or(remote);
         let local = PathBuf::from(local_dir).join(name);
         Ok(self.start_transfer(session, false, local, remote.to_string()))
+    }
+}
+
+fn forward_list(shared: &Shared) -> Vec<ForwardInfo> {
+    match lock(&shared.fwd).clone() {
+        Some(fm) => fm.list(),
+        None => lock(&shared.desired)
+            .iter()
+            .map(|(id, spec)| ForwardInfo {
+                id: *id,
+                spec: spec.clone(),
+                state: ForwardState::Failed {
+                    reason: "not connected".into(),
+                },
+                connections: 0,
+            })
+            .collect(),
+    }
+}
+
+enum Ended {
+    UserClose,
+    Exited(u32),
+    Dropped(String),
+}
+
+/// Owns one SSH session's lifetime: pumps shell I/O, detects a lost connection and
+/// applies the reconnect policy (restoring forwards).
+struct Supervisor<E: Events> {
+    events: Arc<E>,
+    sid: String,
+    tap: Tap,
+    rx: mpsc::UnboundedReceiver<Cmd>,
+    shared: Arc<Shared>,
+    hops: Vec<Hop>,
+    known: Arc<Mutex<KnownHosts>>,
+    known_path: PathBuf,
+    policy: HostKeyPolicy,
+    opts: ConnectOptions,
+    rc: ReconnectConfig,
+    mode: ReconnectPolicy,
+    no_shell: bool,
+    cols: u32,
+    rows: u32,
+    session: Arc<SshSession>,
+    shell: Option<Shell>,
+}
+
+impl<E: Events> Supervisor<E> {
+    /// Publish `session` (and its shell) as the live connection and (re)start forwards.
+    async fn install(&mut self, session: Arc<SshSession>, announce: bool) {
+        *lock(&self.shared.ssh) = Some(session.clone());
+        *self.shared.sftp.lock().await = None;
+        let fm = Arc::new(ForwardManager::new(session.clone()));
+        let desired = lock(&self.shared.desired).clone();
+        for (id, spec) in desired {
+            fm.start_with_id(id, spec).await;
+        }
+        *lock(&self.shared.fwd) = Some(fm);
+        self.session = session;
+        if announce {
+            self.note("\r\n\x1b[32m[reconnected]\x1b[0m\r\n");
+        }
+        self.events
+            .session_state(&self.sid, SessionState::Connected);
+        self.events.forwards(&self.sid, forward_list(&self.shared));
+    }
+
+    /// Terminal-visible status line (also recorded by extensions).
+    fn note(&mut self, text: &str) {
+        self.tap.data(text.as_bytes());
+        self.events.data(&self.sid, text.as_bytes().to_vec());
+    }
+
+    fn teardown(&mut self) {
+        *lock(&self.shared.ssh) = None;
+        *lock(&self.shared.fwd) = None;
+        self.shell = None;
+        self.events.forwards(&self.sid, forward_list(&self.shared));
+    }
+
+    async fn connected(&mut self) -> Ended {
+        loop {
+            let Self {
+                shell,
+                rx,
+                session,
+                tap,
+                events,
+                sid,
+                cols,
+                rows,
+                ..
+            } = self;
+            tokio::select! {
+                ev = async {
+                    match shell.as_mut() {
+                        Some(s) => s.next().await,
+                        None => std::future::pending().await,
+                    }
+                } => match ev {
+                    ShellEvent::Data(d) => { tap.data(&d); events.data(sid, d); }
+                    ShellEvent::Exit(code) => return Ended::Exited(code),
+                    ShellEvent::Closed => return Ended::Dropped("connection closed".into()),
+                },
+                cmd = rx.recv() => match cmd {
+                    Some(Cmd::Write(b)) => { if let Some(s) = shell.as_ref() { let _ = s.write(&b).await; } }
+                    Some(Cmd::Resize(c, r)) => {
+                        *cols = c;
+                        *rows = r;
+                        if let Some(s) = shell.as_ref() { let _ = s.resize(c, r).await; }
+                    }
+                    Some(Cmd::Reconnect) => {}
+                    Some(Cmd::Close) | None => return Ended::UserClose,
+                },
+                () = session.closed() => return Ended::Dropped("connection lost".into()),
+            }
+        }
+    }
+
+    async fn try_connect(&mut self) -> Result<(), SshError> {
+        let s = SshSession::connect_with(
+            &self.hops,
+            self.known.clone(),
+            self.policy.clone(),
+            &self.opts,
+        )
+        .await?;
+        let _ = lock(&self.known).save(&self.known_path);
+        let s = Arc::new(s);
+        let shell = if self.no_shell {
+            None
+        } else {
+            let h = |e: russh::Error| SshError {
+                index: self.hops.len().saturating_sub(1),
+                name: String::new(),
+                kind: ErrorKind::Session(e.to_string()),
+            };
+            Some(s.open_shell(self.cols, self.rows).await.map_err(h)?)
+        };
+        self.shell = shell;
+        self.install(s, true).await;
+        Ok(())
+    }
+
+    /// Wait until the user presses Reconnect (true) or closes the session (false).
+    async fn wait_for_user(&mut self, mut reason: String) -> bool {
+        loop {
+            self.events.session_state(
+                &self.sid,
+                SessionState::Lost {
+                    reason: reason.clone(),
+                },
+            );
+            loop {
+                match self.rx.recv().await {
+                    Some(Cmd::Reconnect) => break,
+                    Some(Cmd::Resize(c, r)) => {
+                        self.cols = c;
+                        self.rows = r;
+                    }
+                    Some(Cmd::Close) | None => return false,
+                    Some(Cmd::Write(_)) => {}
+                }
+            }
+            self.events.session_state(
+                &self.sid,
+                SessionState::Reconnecting {
+                    attempt: 1,
+                    next_in_secs: 0,
+                },
+            );
+            match self.try_connect().await {
+                Ok(()) => return true,
+                Err(e) => reason = e.to_string(),
+            }
+        }
+    }
+
+    /// Retry with backoff until connected (true), the user closes (false), or retrying
+    /// cannot help (falls back to waiting for the user).
+    async fn auto_reconnect(&mut self, reason: String) -> bool {
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            if self.rc.max_attempts.is_some_and(|m| attempt > m) {
+                return self
+                    .wait_for_user(format!("{reason} (gave up after {} attempts)", attempt - 1))
+                    .await;
+            }
+            let delay = self.rc.delay(attempt);
+            self.events.session_state(
+                &self.sid,
+                SessionState::Reconnecting {
+                    attempt,
+                    next_in_secs: delay.as_secs(),
+                },
+            );
+            let sleep = tokio::time::sleep(delay);
+            tokio::pin!(sleep);
+            loop {
+                tokio::select! {
+                    () = &mut sleep => break,
+                    cmd = self.rx.recv() => match cmd {
+                        Some(Cmd::Reconnect) => break,
+                        Some(Cmd::Resize(c, r)) => { self.cols = c; self.rows = r; }
+                        Some(Cmd::Close) | None => return false,
+                        Some(Cmd::Write(_)) => {}
+                    },
+                }
+            }
+            match self.try_connect().await {
+                Ok(()) => return true,
+                Err(e) if !retryable(&e) => return self.wait_for_user(e.to_string()).await,
+                Err(_) => {}
+            }
+        }
+    }
+
+    async fn run(mut self) {
+        loop {
+            match self.connected().await {
+                Ended::UserClose => {
+                    self.teardown();
+                    self.tap.finish();
+                    return;
+                }
+                Ended::Exited(code) => {
+                    self.teardown();
+                    self.tap.finish();
+                    let reason = format!("exit status {code}");
+                    self.events.session_state(
+                        &self.sid,
+                        SessionState::Closed {
+                            reason: reason.clone(),
+                        },
+                    );
+                    self.events.closed(&self.sid, reason);
+                    return;
+                }
+                Ended::Dropped(reason) => {
+                    self.teardown();
+                    self.note("\r\n\x1b[33m[connection lost]\x1b[0m\r\n");
+                    let again = match self.mode {
+                        ReconnectPolicy::Off => false,
+                        ReconnectPolicy::Ask => self.wait_for_user(reason.clone()).await,
+                        ReconnectPolicy::Auto => self.auto_reconnect(reason.clone()).await,
+                    };
+                    if !again {
+                        self.tap.finish();
+                        if self.mode == ReconnectPolicy::Off {
+                            self.events.session_state(
+                                &self.sid,
+                                SessionState::Closed {
+                                    reason: reason.clone(),
+                                },
+                            );
+                            self.events.closed(&self.sid, reason);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_and_caps() {
+        let c = ReconnectConfig {
+            base: Duration::from_secs(1),
+            max: Duration::from_secs(60),
+            max_attempts: None,
+        };
+        let secs: Vec<u64> = (1..=9).map(|a| c.delay(a).as_secs()).collect();
+        assert_eq!(secs, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+        assert_eq!(c.delay(0).as_secs(), 1, "attempt 0 behaves like 1");
+        assert_eq!(c.delay(u32::MAX).as_secs(), 60, "no overflow");
+    }
+
+    #[test]
+    fn only_transport_errors_are_retried() {
+        let e = |kind| SshError {
+            index: 0,
+            name: "h".into(),
+            kind,
+        };
+        assert!(retryable(&e(ErrorKind::Connect("refused".into()))));
+        assert!(retryable(&e(ErrorKind::Session("reset".into()))));
+        assert!(!retryable(&e(ErrorKind::HostKeyChanged)));
+        assert!(!retryable(&e(ErrorKind::HostKeyRejected)));
+        assert!(!retryable(&e(ErrorKind::AuthFailed)));
+        assert!(!retryable(&e(ErrorKind::BadKey("x".into()))));
+    }
+
+    #[test]
+    fn session_state_json_shape() {
+        let j = serde_json::to_string(&SessionState::Reconnecting {
+            attempt: 2,
+            next_in_secs: 4,
+        })
+        .unwrap();
+        assert_eq!(j, r#"{"state":"reconnecting","attempt":2,"nextInSecs":4}"#);
+        assert_eq!(
+            serde_json::to_string(&SessionState::Connected).unwrap(),
+            r#"{"state":"connected"}"#
+        );
     }
 }
