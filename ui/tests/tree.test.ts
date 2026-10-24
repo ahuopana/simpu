@@ -85,3 +85,36 @@ describe("newId", () => {
     expect(newId()).not.toBe(a);
   });
 });
+
+import { exposedForwards, formatForwards, parseForwards } from "../src/tree";
+
+describe("forward syntax", () => {
+  it("parses ssh-like lines", () => {
+    const r = parseForwards("L 5433:db.internal:5432\nr 9000:localhost:3000\nD 1080\nL 0.0.0.0:8080:web:80\n\nD 0.0.0.0:1081");
+    expect(r.errors).toEqual([]);
+    expect(r.forwards).toEqual([
+      { kind: "local", bind_port: 5433, dest_host: "db.internal", dest_port: 5432 },
+      { kind: "remote", bind_port: 9000, dest_host: "localhost", dest_port: 3000 },
+      { kind: "dynamic", bind_port: 1080 },
+      { kind: "local", bind_host: "0.0.0.0", bind_port: 8080, dest_host: "web", dest_port: 80 },
+      { kind: "dynamic", bind_host: "0.0.0.0", bind_port: 1081 },
+    ]);
+  });
+
+  it("reports errors with line numbers and keeps the good lines", () => {
+    const r = parseForwards("L 1:h:2\nX 1\nL 99999:h:1\nD abc\nL 1:h");
+    expect(r.forwards).toHaveLength(1);
+    expect(r.errors.map((e) => e.split(":")[0])).toEqual(["line 2", "line 3", "line 4", "line 5"]);
+  });
+
+  it("round-trips through format", () => {
+    const text = "L 5433:db.internal:5432\nR 9000:localhost:3000\nD 1080\nL 0.0.0.0:8080:web:80";
+    expect(formatForwards(parseForwards(text).forwards)).toBe(text);
+    expect(formatForwards(undefined)).toBe("");
+  });
+
+  it("flags non-loopback binds", () => {
+    const f = parseForwards("L 1:h:2\nL 0.0.0.0:3:h:4\nD localhost:5").forwards;
+    expect(exposedForwards(f)).toHaveLength(1);
+  });
+});

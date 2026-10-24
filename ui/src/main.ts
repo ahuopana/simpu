@@ -1,11 +1,11 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import type { ConnectionDto, ExportRequest, NodeDto } from "./api";
+import type { ConnectionDto, ExportRequest, ForwardInfo, NodeDto, SessionState } from "./api";
 import { backend, inTauri } from "./backend";
 import { closeLeaf, type Dir, leaves, newTab, type Pane, splitLeaf, type Tab } from "./layout";
 import "./style.css";
-import { addFolder, allConnections, filterTree, findConnection, folderNames, folderOf, newId, removeConnection, upsertConnection, validate } from "./tree";
+import { addFolder, allConnections, exposedForwards, formatForwards, parseForwards, filterTree, findConnection, folderNames, folderOf, newId, removeConnection, upsertConnection, validate } from "./tree";
 
 interface View {
   leafId: string;
@@ -16,6 +16,7 @@ interface View {
   fit: FitAddon;
   unlisten: (() => void)[];
   closed: boolean;
+  status: HTMLElement;
 }
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -104,6 +105,13 @@ function openEditor(existing?: ConnectionDto) {
     <label>Secret kind</label><select name="kind" data-testid="edit-kind"><option>password</option><option>keyfile</option></select>
     <label>Jump hosts</label><select name="jump" data-testid="edit-jump" multiple size="3">
       ${jumpCandidates.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")}</select>
+    <label>Forwards</label><textarea name="forwards" rows="3" data-testid="edit-forwards" placeholder="one per line, like ssh:&#10;L 5433:db.internal:5432&#10;R 9000:localhost:3000&#10;D 1080"></textarea>
+    <span></span><span class="err" data-err="forwards" data-testid="edit-forwards-err"></span>
+    <span></span><span class="warn" data-testid="edit-forwards-warn"></span>
+    <label>On disconnect</label><select name="reconnect" data-testid="edit-reconnect">
+      <option value="">Default (auto with forwards, otherwise ask)</option><option value="auto">Reconnect automatically</option>
+      <option value="ask">Ask me</option><option value="off">Close the session</option></select>
+    <label>Tunnel only</label><label><input type="checkbox" name="no_shell" data-testid="edit-noshell" /> No interactive shell (like ssh -N)</label>
     <label>Folder</label><select name="folder" data-testid="edit-folder">
       <option value="">(top level)</option>${folders.map((f) => `<option>${esc(f)}</option>`).join("")}</select>
     <div class="buttons"><button type="button" data-testid="edit-cancel">Cancel</button>
@@ -121,7 +129,17 @@ function openEditor(existing?: ConnectionDto) {
     f("kind").value = existing.secret?.kind ?? "password";
     for (const o of Array.from(f("jump").options)) o.selected = existing.jump?.includes(o.value) ?? false;
     f("folder").value = cur ?? "";
+    (form.elements.namedItem("forwards") as HTMLTextAreaElement).value = formatForwards(existing.forwards);
+    f("reconnect").value = existing.reconnect ?? "";
+    f("no_shell").checked = existing.no_shell ?? false;
   }
+  const fwText = () => (form.elements.namedItem("forwards") as HTMLTextAreaElement).value;
+  const updateFwWarn = () => {
+    const warn = m.querySelector<HTMLElement>('[data-testid="edit-forwards-warn"]')!;
+    warn.textContent = exposedForwards(parseForwards(fwText()).forwards).length ? "Some forwards listen on a non-loopback address and are reachable from other machines." : "";
+  };
+  form.addEventListener("input", updateFwWarn);
+  updateFwWarn();
   const close = () => {
     m.hidden = true;
     m.replaceChildren();
@@ -143,13 +161,123 @@ function openEditor(existing?: ConnectionDto) {
         ? { secret: { provider: f("provider").value, item: f("item").value.trim(), kind: f("kind").value as "password" | "keyfile" } }
         : {}),
     };
-    const errors = validate(conn);
+    const fw = parseForwards(fwText());
+    if (fw.forwards.length) conn.forwards = fw.forwards;
+    if (f("reconnect").value) conn.reconnect = f("reconnect").value as "auto" | "ask" | "off";
+    if (f("no_shell").checked) conn.no_shell = true;
+    const errors: Record<string, string> = { ...validate(conn), ...(fw.errors.length ? { forwards: fw.errors.join("; ") } : {}) };
     form.querySelectorAll<HTMLElement>("[data-err]").forEach((el) => (el.textContent = errors[el.dataset.err!] ?? ""));
     if (Object.keys(errors).length) return;
     close();
     void persist(upsertConnection(nodes, conn, f("folder").value || null));
   });
   f("name").focus();
+}
+
+// ---------- connection state ----------
+function renderStatus(v: View, st: SessionState) {
+  const bar = v.status;
+  const btn = (label: string, id: string, fn: () => void) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.dataset.testid = id;
+    b.addEventListener("click", fn);
+    bar.append(b);
+  };
+  bar.replaceChildren();
+  bar.hidden = true;
+  if (st.state === "reconnecting") {
+    bar.hidden = false;
+    const t = document.createElement("span");
+    t.dataset.testid = "status-text";
+    t.textContent = `Reconnecting… attempt ${st.attempt}${st.nextInSecs ? `, next try in ${st.nextInSecs}s` : ""}`;
+    bar.append(t);
+    btn("Reconnect now", "reconnect-now", () => void backend.reconnectSession(v.sessionId));
+    btn("Close", "status-close", () => closeLeafById(v.leafId));
+  } else if (st.state === "lost") {
+    bar.hidden = false;
+    const t = document.createElement("span");
+    t.dataset.testid = "status-text";
+    t.textContent = `Connection lost: ${st.reason}`;
+    bar.append(t);
+    btn("Reconnect", "reconnect", () => void backend.reconnectSession(v.sessionId));
+    btn("Close", "status-close", () => closeLeafById(v.leafId));
+  }
+}
+
+function closeLeafById(leafId: string) {
+  const t = tabs.find((x) => leaves(x.root).some((l) => l.id === leafId));
+  if (!t) return;
+  t.focus = leafId;
+  activeTab = t.id;
+  closePane();
+}
+
+// ---------- forwards panel ----------
+function openForwards() {
+  const v = focusedView();
+  if (!v) return;
+  const m = $("modal");
+  m.hidden = false;
+  m.innerHTML = `<div class="box wide" role="dialog" data-testid="forwards-dialog">
+    <h3>Port forwards — ${esc(v.conn.name)}</h3>
+    <table><thead><tr><th>Type</th><th>Listen</th><th>Destination</th><th>Status</th><th></th></tr></thead>
+      <tbody data-testid="forwards-rows"></tbody></table>
+    <form data-testid="forward-form" class="row" novalidate>
+      <select name="kind" data-testid="fw-kind"><option value="local">Local (-L)</option><option value="remote">Remote (-R)</option><option value="dynamic">SOCKS (-D)</option></select>
+      <input name="bind_host" placeholder="bind address (127.0.0.1)" data-testid="fw-bind" size="22" />
+      <input name="bind_port" placeholder="port" data-testid="fw-port" size="6" />
+      <input name="dest_host" placeholder="dest host" data-testid="fw-dest-host" size="16" />
+      <input name="dest_port" placeholder="dest port" data-testid="fw-dest-port" size="6" />
+      <button type="submit" data-testid="fw-add">Add</button>
+    </form>
+    <div class="err" data-testid="fw-error"></div>
+    <div class="warn" data-testid="fw-warn"></div>
+    <div class="buttons"><button type="button" data-testid="fw-close">Close</button></div></div>`;
+  const rows = m.querySelector<HTMLElement>('[data-testid="forwards-rows"]')!;
+  const form = m.querySelector("form")!;
+  const f = (n: string) => form.elements.namedItem(n) as HTMLInputElement & HTMLSelectElement;
+  const q = (id: string) => m.querySelector<HTMLElement>(`[data-testid="${id}"]`)!;
+  const show = (list: ForwardInfo[]) => {
+    rows.replaceChildren();
+    for (const fw of list) {
+      const tr = document.createElement("tr");
+      const dest = fw.spec.kind === "dynamic" ? "SOCKS5 proxy" : `${fw.spec.dest_host}:${fw.spec.dest_port}`;
+      const listen = `${fw.spec.bind_host ?? "127.0.0.1"}:${fw.state === "listening" ? fw.port : fw.spec.bind_port}`;
+      const status = fw.state === "listening" ? `listening (${fw.connections} conn.)` : `failed: ${fw.reason}`;
+      tr.innerHTML = `<td>${fw.spec.kind}</td><td>${esc(listen)}</td><td>${esc(dest)}</td><td class="${fw.state === "failed" ? "failed" : ""}" data-testid="fw-status">${esc(status)}</td><td><button type="button" data-testid="fw-stop-${fw.id}">Stop</button></td>`;
+      tr.querySelector("button")!.addEventListener("click", () => void backend.forwardStop(v.sessionId, fw.id).then(refresh));
+      rows.append(tr);
+    }
+    q("fw-warn").textContent = exposedForwards(list.map((x) => x.spec)).length ? "Some forwards listen on a non-loopback address and are reachable from other machines." : "";
+  };
+  const refresh = () => backend.forwardList(v.sessionId).then(show, () => show([]));
+  const un = backend.onForwards(v.sessionId, show);
+  const timer = setInterval(() => void refresh(), 1500);
+  const close = () => {
+    clearInterval(timer);
+    un();
+    m.hidden = true;
+    m.replaceChildren();
+  };
+  q("fw-close").addEventListener("click", close);
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const kind = f("kind").value as "local" | "remote" | "dynamic";
+    const text = `${kind === "local" ? "L" : kind === "remote" ? "R" : "D"} ${f("bind_host").value.trim() ? f("bind_host").value.trim() + ":" : ""}${f("bind_port").value.trim()}${kind === "dynamic" ? "" : `:${f("dest_host").value.trim()}:${f("dest_port").value.trim()}`}`;
+    const parsed = parseForwards(text);
+    q("fw-error").textContent = parsed.errors.join("; ");
+    const spec = parsed.forwards[0];
+    if (!spec) return;
+    backend.forwardAdd(v.sessionId, spec).then(
+      () => {
+        form.reset();
+        void refresh();
+      },
+      (err: unknown) => (q("fw-error").textContent = String(err instanceof Error ? err.message : err)),
+    );
+  });
+  void refresh();
 }
 
 // ---------- log capture ----------
@@ -294,7 +422,12 @@ function createView(conn: ConnectionDto): View {
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open(holder);
-  const v: View = { leafId, sessionId, conn, el, term, fit, unlisten: [], closed: false };
+  const status = document.createElement("div");
+  status.className = "statusbar";
+  status.dataset.testid = "statusbar";
+  status.hidden = true;
+  el.append(status);
+  const v: View = { leafId, sessionId, conn, el, term, fit, unlisten: [], closed: false, status };
   term.onData((d) => void backend.write(sessionId, d));
   term.onResize(({ cols, rows }) => void backend.resize(sessionId, cols, rows));
   v.unlisten.push(
@@ -307,6 +440,7 @@ function createView(conn: ConnectionDto): View {
       el.append(m);
     }),
   );
+  v.unlisten.push(backend.onSessionState(sessionId, (st) => renderStatus(v, st)));
   el.addEventListener("mousedown", () => focusLeaf(leafId));
   wireDrop(v);
   const ro = new ResizeObserver(() => requestAnimationFrame(() => safeFit(v)));
@@ -607,6 +741,7 @@ $("split-row").addEventListener("click", () => split("row"));
 $("split-col").addEventListener("click", () => split("col"));
 $("close-pane").addEventListener("click", closePane);
 $("rec").addEventListener("click", () => void toggleRecording());
+$("forwards-btn").addEventListener("click", openForwards);
 $("export-log").addEventListener("click", openExport);
 $("search").addEventListener("input", renderTree);
 $("new-conn").addEventListener("click", () => openEditor());

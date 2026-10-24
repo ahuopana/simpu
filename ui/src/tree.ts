@@ -1,4 +1,4 @@
-import type { ConnectionDto, NodeDto } from "./api";
+import type { ConnectionDto, ForwardSpec, NodeDto } from "./api";
 
 export function matches(c: ConnectionDto, q: string): boolean {
   const s = q.toLowerCase();
@@ -111,4 +111,58 @@ export function newId(): string {
   b[8] = (b[8]! & 0x3f) | 0x80;
   const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+// ---------- forwards: ssh-like text syntax ----------
+
+const KIND_LETTER = { local: "L", remote: "R", dynamic: "D" } as const;
+
+/** One forward per line: `L [bind:]port:host:hostport`, `R ...`, `D [bind:]port` (like ssh -L/-R/-D). */
+export function formatForwards(list: ForwardSpec[] | undefined): string {
+  return (list ?? [])
+    .map((f) => {
+      const bind = f.bind_host && f.bind_host !== "127.0.0.1" ? `${f.bind_host}:` : "";
+      return f.kind === "dynamic"
+        ? `D ${bind}${f.bind_port}`
+        : `${KIND_LETTER[f.kind]} ${bind}${f.bind_port}:${f.dest_host}:${f.dest_port}`;
+    })
+    .join("\n");
+}
+
+const portOk = (s: string) => /^\d+$/.test(s) && Number(s) >= 1 && Number(s) <= 65535;
+
+export function parseForwards(text: string): { forwards: ForwardSpec[]; errors: string[] } {
+  const forwards: ForwardSpec[] = [];
+  const errors: string[] = [];
+  text.split("\n").forEach((raw, i) => {
+    const line = raw.trim();
+    if (!line) return;
+    const bad = (why: string) => errors.push(`line ${i + 1}: ${why}`);
+    const m = /^([LRDlrd])\s+(\S+)$/.exec(line);
+    if (!m) return bad("expected `L|R|D spec`, e.g. `L 5433:db.internal:5432`");
+    const letter = m[1]!.toUpperCase();
+    const parts = m[2]!.split(":");
+    if (letter === "D") {
+      if (parts.length > 2 || !portOk(parts[parts.length - 1]!)) return bad("dynamic forward is `D [bind:]port`");
+      forwards.push({ kind: "dynamic", ...(parts.length === 2 ? { bind_host: parts[0]! } : {}), bind_port: Number(parts[parts.length - 1]) });
+      return;
+    }
+    if (parts.length !== 3 && parts.length !== 4) return bad("expected `[bind:]port:host:hostport`");
+    const bind = parts.length === 4 ? parts[0]! : undefined;
+    const [port, host, hostPort] = parts.slice(-3) as [string, string, string];
+    if (!portOk(port) || !portOk(hostPort) || !host) return bad("ports must be 1-65535 and host must not be empty");
+    forwards.push({
+      kind: letter === "L" ? "local" : "remote",
+      ...(bind ? { bind_host: bind } : {}),
+      bind_port: Number(port),
+      dest_host: host,
+      dest_port: Number(hostPort),
+    });
+  });
+  return { forwards, errors };
+}
+
+/** Forwards reachable from other machines (non-loopback bind). */
+export function exposedForwards(list: ForwardSpec[]): ForwardSpec[] {
+  return list.filter((f) => f.bind_host && !["127.0.0.1", "localhost", "::1"].includes(f.bind_host));
 }

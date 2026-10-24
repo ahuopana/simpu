@@ -58,6 +58,17 @@ Install KeePassXC (it ships `keepassxc-cli`). Before starting Simpu set
 stored as an attachment (kind `keyfile`; without `#` the key is read from Notes).
 The master password is asked in-app on first use.
 
+## Port forwarding and reconnect
+
+In the connection editor, **Forwards** takes one line per forward in `ssh` style:
+`L 5433:db.internal:5432` (local), `R 9000:localhost:3000` (remote), `D 1080` (SOCKS5);
+prefix the port with a bind address (`L 0.0.0.0:8080:web:80`) to expose it to other
+machines. **On disconnect** chooses auto / ask / close (default: auto when forwards
+exist, otherwise ask). **Tunnel only** skips the shell (like `ssh -N`). The
+"⇄ Forwards" toolbar button shows live forwards of the focused session and lets you
+add or stop them. `LocalForward`, `RemoteForward`, `DynamicForward` and
+`SessionType none` are imported from `~/.ssh/config`.
+
 ## Log capture
 
 Use "● Record" on a pane, then "Export log…": everything or the last N commands

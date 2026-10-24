@@ -60,3 +60,11 @@ html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:
 #modal .preview { height:200px; }
 #modal .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin:4px 0; }
 #modal .map { font:11px monospace; color:var(--muted); max-height:80px; overflow:auto; }
+
+.statusbar { position:absolute; left:0; right:0; bottom:0; z-index:6; display:flex; gap:10px; align-items:center; padding:4px 10px; background:var(--warn); color:#000; }
+.statusbar[hidden] { display:none; }
+.statusbar button { background:#000; color:#fff; border:0; border-radius:3px; padding:2px 8px; cursor:pointer; }
+#modal table { border-collapse:collapse; width:100%; margin:6px 0; }
+#modal th, #modal td { text-align:left; padding:3px 8px; border-bottom:1px solid #444; }
+#modal .failed { color:#f66; }
+#modal .warn { color:var(--warn); }

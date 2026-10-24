@@ -2,7 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
-import type { Backend, CredentialPrompt, HostKeyPrompt, TransferProgress, Unlisten } from "./api";
+import type { Backend, CredentialPrompt, ForwardInfo, HostKeyPrompt, SessionState, TransferProgress, Unlisten } from "./api";
 
 function sub<T>(event: string, cb: (p: T) => void): Unlisten {
   let un: (() => void) | undefined;
@@ -28,6 +28,12 @@ export const tauriBackend: Backend = {
   answerHostKey: (promptId, trust) => invoke("hostkey_answer", { promptId, trust }),
   onCredentialPrompt: (cb) => sub<CredentialPrompt>("credential-prompt", cb),
   answerCredential: (promptId, secret) => invoke("credential_answer", { promptId, secret }),
+  onSessionState: (sessionId, cb) => sub<SessionState>(`session-state-${sessionId}`, cb),
+  onForwards: (sessionId, cb) => sub<ForwardInfo[]>(`forwards-${sessionId}`, cb),
+  reconnectSession: (sessionId) => invoke("session_reconnect", { sessionId }),
+  forwardAdd: (sessionId, spec) => invoke("forward_add", { sessionId, spec }),
+  forwardStop: (sessionId, forwardId) => invoke("forward_stop", { sessionId, forwardId }),
+  forwardList: (sessionId) => invoke("forward_list", { sessionId }),
   captureStart: (sessionId) => invoke("capture_start", { sessionId }),
   captureStop: (sessionId) => invoke("capture_stop", { sessionId }),
   captureStatus: (sessionId) => invoke("capture_status", { sessionId }),

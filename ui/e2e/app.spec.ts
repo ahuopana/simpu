@@ -283,3 +283,119 @@ test("each vault provider is unlocked separately", async ({ page }) => {
   await page.getByTestId("hostkey-trust").click();
   await expect(page.getByTestId("tab-kp")).toBeVisible();
 });
+
+test.describe("forwards and reconnect", () => {
+  const mockOf = (page: Page) => page.evaluate(() => (window as any).__simpu.backend);
+
+  async function newConn(page: Page, extra: { forwards?: string; reconnect?: string; noShell?: boolean } = {}) {
+    await page.getByTestId("new-conn").click();
+    await page.getByTestId("edit-name").fill("tun");
+    await page.getByTestId("edit-host").fill("tun.example.com");
+    await page.getByTestId("edit-provider").selectOption("file");
+    await page.getByTestId("edit-item").fill("~/.ssh/id_ed25519");
+    if (extra.forwards) await page.getByTestId("edit-forwards").fill(extra.forwards);
+    if (extra.reconnect) await page.getByTestId("edit-reconnect").selectOption(extra.reconnect);
+    if (extra.noShell) await page.getByTestId("edit-noshell").check();
+    await page.getByTestId("edit-save").click();
+  }
+
+  async function openTun(page: Page) {
+    await page.getByTestId("conn-tun").dblclick();
+    await page.getByTestId("hostkey-trust").click();
+    await expect.poll(() => screen(page)).toContain("Connected");
+  }
+
+  test("editor saves forwards, policy and tunnel-only; validates syntax; warns about exposed binds", async ({ page }) => {
+    await page.getByTestId("new-conn").click();
+    await page.getByTestId("edit-name").fill("tun");
+    await page.getByTestId("edit-host").fill("h");
+    await page.getByTestId("edit-forwards").fill("L 5433:db:5432\nbogus line");
+    await page.getByTestId("edit-save").click();
+    await expect(page.getByTestId("edit-forwards-err")).toContainText("line 2");
+    await page.getByTestId("edit-forwards").fill("L 5433:db:5432\nD 0.0.0.0:1080");
+    await expect(page.getByTestId("edit-forwards-warn")).toContainText("non-loopback");
+    await page.getByTestId("edit-reconnect").selectOption("off");
+    await page.getByTestId("edit-noshell").check();
+    await page.getByTestId("edit-save").click();
+    const tree = await page.evaluate(() => (window as any).__simpu.backend.tree);
+    const c = tree.find((n: any) => n.name === "tun");
+    expect(c).toMatchObject({
+      reconnect: "off",
+      no_shell: true,
+      forwards: [
+        { kind: "local", bind_port: 5433, dest_host: "db", dest_port: 5432 },
+        { kind: "dynamic", bind_host: "0.0.0.0", bind_port: 1080 },
+      ],
+    });
+    // editing shows the saved text again
+    await page.getByTestId("conn-tun").hover();
+    await page.getByTestId("edit-tun").click();
+    await expect(page.getByTestId("edit-forwards")).toHaveValue("L 5433:db:5432\nD 0.0.0.0:1080");
+    await expect(page.getByTestId("edit-reconnect")).toHaveValue("off");
+  });
+
+  test("saved forwards appear in the panel; add and stop ad-hoc forwards", async ({ page }) => {
+    await newConn(page, { forwards: "L 5433:db:5432" });
+    await openTun(page);
+    await page.getByTestId("forwards-btn").click();
+    await expect(page.getByTestId("forwards-rows")).toContainText("5433");
+    await expect(page.getByTestId("fw-status").first()).toContainText("listening");
+
+    await page.getByTestId("fw-kind").selectOption("dynamic");
+    await page.getByTestId("fw-port").fill("1080");
+    await page.getByTestId("fw-add").click();
+    await expect(page.getByTestId("forwards-rows")).toContainText("SOCKS5 proxy");
+
+    await page.getByTestId("fw-port").fill("99999");
+    await page.getByTestId("fw-add").click();
+    await expect(page.getByTestId("fw-error")).toContainText("1-65535");
+
+    await page.getByTestId("fw-stop-1").click();
+    await expect(page.getByTestId("forwards-rows")).not.toContainText("db:5432");
+    await page.getByTestId("fw-close").click();
+  });
+
+  test("auto reconnect: banner while reconnecting, then back; forwards still listed", async ({ page }) => {
+    await newConn(page, { forwards: "L 5433:db:5432" }); // default policy with forwards = auto
+    await openTun(page);
+    const sid = await page.evaluate(() => [...(window as any).__simpu.backend.sessions.keys()][0]);
+    await page.evaluate((id) => {
+      const b = (window as any).__simpu.backend;
+      b.reconnectDelayMs = 800;
+      b.dropSession(id);
+    }, sid);
+    await expect(page.getByTestId("status-text")).toContainText("Reconnecting");
+    await expect.poll(() => screen(page)).toContain("[connection lost]");
+    await expect(page.getByTestId("statusbar")).toBeHidden({ timeout: 5000 });
+    await expect.poll(() => screen(page)).toContain("[reconnected]");
+    await page.getByTestId("forwards-btn").click();
+    await expect(page.getByTestId("forwards-rows")).toContainText("5433");
+  });
+
+  test("ask policy: lost banner with Reconnect and Close buttons", async ({ page }) => {
+    await newConn(page); // no forwards -> ask
+    await openTun(page);
+    const sid = await page.evaluate(() => [...(window as any).__simpu.backend.sessions.keys()][0]);
+    await page.evaluate((id) => (window as any).__simpu.backend.dropSession(id), sid);
+    await expect(page.getByTestId("status-text")).toContainText("Connection lost");
+    await page.waitForTimeout(500);
+    expect((await mockOf(page).then((b) => b)).reconnects).toEqual([]);
+    await page.getByTestId("reconnect").click();
+    await expect(page.getByTestId("statusbar")).toBeHidden();
+    expect(await page.evaluate(() => (window as any).__simpu.backend.reconnects.length)).toBe(1);
+
+    // drop again and choose Close
+    await page.evaluate((id) => (window as any).__simpu.backend.dropSession(id), sid);
+    await page.getByTestId("status-close").click();
+    await expect(page.locator(".leaf")).toHaveCount(0);
+  });
+
+  test("off policy closes the session", async ({ page }) => {
+    await newConn(page, { reconnect: "off" });
+    await openTun(page);
+    const sid = await page.evaluate(() => [...(window as any).__simpu.backend.sessions.keys()][0]);
+    await page.evaluate((id) => (window as any).__simpu.backend.dropSession(id), sid);
+    await expect(page.locator(".closed")).toContainText("connection lost");
+    await expect(page.getByTestId("statusbar")).toBeHidden();
+  });
+});

@@ -1,5 +1,5 @@
 // In-memory backend used by `vite dev` in a plain browser and by the e2e tests.
-import type { Backend, CaptureStatus, ExportRequest, ExportResponse, ConnectionDto, CredentialPrompt, HostKeyPrompt, NodeDto, RemoteEntry, TransferProgress } from "./api";
+import type { Backend, ForwardInfo, ForwardSpec, SessionState, CaptureStatus, ExportRequest, ExportResponse, ConnectionDto, CredentialPrompt, HostKeyPrompt, NodeDto, RemoteEntry, TransferProgress } from "./api";
 
 const sample: NodeDto[] = [
   {
@@ -41,7 +41,7 @@ export class MockBackend implements Backend {
   tree: NodeDto[] = structuredClone(sample);
   private data = new Map<string, Emitter<Uint8Array>>();
   private closed = new Map<string, Emitter<string>>();
-  private sessions = new Map<string, { conn: ConnectionDto; line: string }>();
+  sessions = new Map<string, { conn: ConnectionDto; line: string }>();
   private hostPrompts = new Emitter<HostKeyPrompt>();
   private progress = new Emitter<TransferProgress>();
   private credPrompts = new Emitter<CredentialPrompt>();
@@ -61,6 +61,78 @@ export class MockBackend implements Backend {
   }
   async saveTree(nodes: NodeDto[]) {
     this.tree = structuredClone(nodes);
+  }
+
+  // ----- forwards and reconnect (simplified stand-ins; real logic is tested in Rust) -----
+  private stateEm = new Map<string, Emitter<SessionState>>();
+  private fwdEm = new Map<string, Emitter<ForwardInfo[]>>();
+  private forwards = new Map<string, ForwardInfo[]>();
+  private nextFwd = 0;
+  private lost = new Set<string>();
+  /** How long the mock "auto reconnect" takes. */
+  reconnectDelayMs = 200;
+  /** Reconnects performed (for assertions). */
+  reconnects: string[] = [];
+
+  private setState(id: string, s: SessionState) {
+    this.em(this.stateEm, id).emit(s);
+  }
+  private pushForwards(id: string) {
+    this.em(this.fwdEm, id).emit(structuredClone(this.forwards.get(id) ?? []));
+  }
+  private listening(spec: ForwardSpec): ForwardInfo {
+    const id = ++this.nextFwd;
+    return { id, spec, connections: 0, state: "listening", port: spec.bind_port || 40000 + id };
+  }
+  onSessionState(id: string, cb: (s: SessionState) => void) {
+    return this.em(this.stateEm, id).on(cb);
+  }
+  onForwards(id: string, cb: (l: ForwardInfo[]) => void) {
+    return this.em(this.fwdEm, id).on(cb);
+  }
+  async forwardAdd(sessionId: string, spec: ForwardSpec) {
+    if (!this.sessions.has(sessionId)) throw new Error("no such session");
+    if (spec.kind !== "dynamic" && (!spec.dest_host || !spec.dest_port)) throw new Error("destination host and port are required");
+    const info = this.listening(spec);
+    this.forwards.set(sessionId, [...(this.forwards.get(sessionId) ?? []), info]);
+    this.pushForwards(sessionId);
+    return info;
+  }
+  async forwardStop(sessionId: string, forwardId: number) {
+    this.forwards.set(sessionId, (this.forwards.get(sessionId) ?? []).filter((f) => f.id !== forwardId));
+    this.pushForwards(sessionId);
+  }
+  async forwardList(sessionId: string) {
+    return structuredClone(this.forwards.get(sessionId) ?? []);
+  }
+  /** Test hook: simulate the connection dropping. */
+  dropSession(id: string) {
+    const conn = this.sessions.get(id)?.conn;
+    if (!conn) return;
+    const mode = conn.reconnect ?? (conn.forwards?.length ? "auto" : "ask");
+    this.out(id, "\r\n[connection lost]\r\n");
+    if (mode === "off") {
+      this.setState(id, { state: "closed", reason: "connection lost" });
+      this.em(this.closed, id).emit("connection lost");
+    } else if (mode === "ask") {
+      this.lost.add(id);
+      this.setState(id, { state: "lost", reason: "connection lost" });
+    } else {
+      this.setState(id, { state: "reconnecting", attempt: 1, nextInSecs: 1 });
+      setTimeout(() => this.finishReconnect(id), this.reconnectDelayMs);
+    }
+  }
+  private finishReconnect(id: string) {
+    this.lost.delete(id);
+    this.reconnects.push(id);
+    this.out(id, "\r\n[reconnected]\r\n$ ");
+    this.setState(id, { state: "connected" });
+    this.pushForwards(id);
+  }
+  async reconnectSession(id: string) {
+    if (!this.lost.has(id)) return;
+    this.setState(id, { state: "reconnecting", attempt: 1, nextInSecs: 0 });
+    setTimeout(() => this.finishReconnect(id), 100);
   }
 
   // ----- capture (simplified stand-in for simpu-capture; the real logic is unit-tested in Rust) -----
@@ -192,6 +264,9 @@ export class MockBackend implements Backend {
       this.trusted.add(conn.host);
     }
     this.sessions.set(id, { conn, line: "" });
+    this.setState(id, { state: "connected" });
+    this.forwards.set(id, (conn.forwards ?? []).map((f) => this.listening(f)));
+    this.pushForwards(id);
     this.out(id, `Connected to ${conn.username}@${conn.host}\r\n$ `);
   }
 

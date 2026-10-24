@@ -4,10 +4,11 @@ use serde::Serialize;
 use simpu_capture::api::{ExportRequest, ExportResponse, KnownNames, StatusResponse};
 use simpu_capture::Capture;
 use simpu_core::credentials::Credentials;
+use simpu_core::forward::ForwardInfo;
 use simpu_core::manager::{
-    CredentialPromptInfo, Events, Manager, PromptInfo, RemoteEntry, TransferInfo,
+    CredentialPromptInfo, Events, Manager, PromptInfo, RemoteEntry, SessionState, TransferInfo,
 };
-use simpu_core::model::{Node, Tree};
+use simpu_core::model::{Forward, Node, Tree};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager as _, State};
 
@@ -31,6 +32,12 @@ impl Events for TauriEvents {
     }
     fn credential_prompt(&self, p: CredentialPromptInfo) {
         self.emit("credential-prompt", p);
+    }
+    fn session_state(&self, session: &str, state: SessionState) {
+        self.emit(&format!("session-state-{session}"), state);
+    }
+    fn forwards(&self, session: &str, list: Vec<ForwardInfo>) {
+        self.emit(&format!("forwards-{session}"), list);
     }
     fn progress(&self, p: TransferInfo) {
         self.emit("transfer-progress", p);
@@ -151,6 +158,34 @@ fn import_ssh_config(app: State<'_, App>) -> Result<usize, String> {
 }
 
 #[tauri::command]
+fn session_reconnect(app: State<'_, App>, session_id: String) {
+    app.reconnect(&session_id);
+}
+
+#[tauri::command]
+async fn forward_add(
+    app: State<'_, App>,
+    session_id: String,
+    spec: Forward,
+) -> Result<ForwardInfo, String> {
+    app.forward_add(&session_id, spec).await
+}
+
+#[tauri::command]
+async fn forward_stop(
+    app: State<'_, App>,
+    session_id: String,
+    forward_id: u32,
+) -> Result<(), String> {
+    app.forward_stop(&session_id, forward_id).await
+}
+
+#[tauri::command]
+fn forward_list(app: State<'_, App>, session_id: String) -> Result<Vec<ForwardInfo>, String> {
+    app.forward_list(&session_id)
+}
+
+#[tauri::command]
 fn credential_answer(app: State<'_, App>, prompt_id: String, secret: Option<String>) {
     app.answer_credential(&prompt_id, secret);
 }
@@ -211,6 +246,10 @@ pub fn run() {
             capture_regex_error,
             hostkey_answer,
             credential_answer,
+            session_reconnect,
+            forward_add,
+            forward_stop,
+            forward_list,
             import_ssh_config,
             sftp_list,
             sftp_upload,

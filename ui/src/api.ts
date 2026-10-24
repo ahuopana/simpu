@@ -12,7 +12,33 @@ export interface ConnectionDto {
   username: string;
   jump?: string[];
   secret?: { provider: string; item: string; kind: "password" | "keyfile" };
+  forwards?: ForwardSpec[];
+  /** Omitted = default: auto when the connection has forwards, otherwise ask. */
+  reconnect?: "auto" | "ask" | "off";
+  /** Tunnel only: no interactive shell. */
+  no_shell?: boolean;
 }
+
+export interface ForwardSpec {
+  kind: "local" | "remote" | "dynamic";
+  bind_host?: string; // default 127.0.0.1
+  bind_port: number;
+  dest_host?: string;
+  dest_port?: number;
+}
+
+export type ForwardInfo = {
+  id: number;
+  spec: ForwardSpec;
+  connections: number;
+} & ({ state: "listening"; port: number } | { state: "failed"; reason: string });
+
+export type SessionState =
+  | { state: "connecting" }
+  | { state: "connected" }
+  | { state: "reconnecting"; attempt: number; nextInSecs: number }
+  | { state: "lost"; reason: string }
+  | { state: "closed"; reason: string };
 
 export interface FolderDto {
   type: "folder";
@@ -104,6 +130,13 @@ export interface Backend {
   onCredentialPrompt(cb: (p: CredentialPrompt) => void): Unlisten;
   /** `null` cancels the connection attempt. */
   answerCredential(promptId: string, secret: string | null): Promise<void>;
+
+  onSessionState(sessionId: string, cb: (s: SessionState) => void): Unlisten;
+  onForwards(sessionId: string, cb: (list: ForwardInfo[]) => void): Unlisten;
+  reconnectSession(sessionId: string): Promise<void>;
+  forwardAdd(sessionId: string, spec: ForwardSpec): Promise<ForwardInfo>;
+  forwardStop(sessionId: string, forwardId: number): Promise<void>;
+  forwardList(sessionId: string): Promise<ForwardInfo[]>;
 
   captureStart(sessionId: string): Promise<void>;
   captureStop(sessionId: string): Promise<void>;
