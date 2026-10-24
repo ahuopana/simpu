@@ -1,6 +1,6 @@
 //! Import connections from an OpenSSH client config (`~/.ssh/config`).
 
-use crate::model::{Connection, Protocol, SecretKind, SecretRef};
+use crate::model::{Connection, Forward, ForwardKind, Protocol, SecretKind, SecretRef};
 use std::collections::HashMap;
 
 #[derive(Default, Debug)]
@@ -50,6 +50,51 @@ fn opt<'a>(b: &'a Block, key: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
+/// `[bind_address:]port` (IPv6 bind addresses in brackets).
+fn parse_bind(spec: &str) -> Option<(String, u16)> {
+    let spec = spec.trim();
+    match spec.rsplit_once(':') {
+        Some((host, port)) => Some((
+            host.trim_matches(['[', ']']).to_string(),
+            port.parse().ok()?,
+        )),
+        None => Some(("127.0.0.1".to_string(), spec.parse().ok()?)),
+    }
+}
+
+/// `LocalForward`/`RemoteForward` value: `[bind:]port host:port`.
+fn parse_forward(kind: ForwardKind, value: &str) -> Option<Forward> {
+    let mut it = value.split_whitespace();
+    let (bind_host, bind_port) = parse_bind(it.next()?)?;
+    let (dest_host, dest_port) = it.next()?.rsplit_once(':')?;
+    Some(Forward {
+        kind,
+        bind_host: if bind_host == "*" || bind_host.is_empty() {
+            "0.0.0.0".into()
+        } else {
+            bind_host
+        },
+        bind_port,
+        dest_host: Some(dest_host.trim_matches(['[', ']']).to_string()),
+        dest_port: Some(dest_port.parse().ok()?),
+    })
+}
+
+fn parse_dynamic(value: &str) -> Option<Forward> {
+    let (bind_host, bind_port) = parse_bind(value.split_whitespace().next()?)?;
+    Some(Forward {
+        kind: ForwardKind::Dynamic,
+        bind_host: if bind_host == "*" || bind_host.is_empty() {
+            "0.0.0.0".into()
+        } else {
+            bind_host
+        },
+        bind_port,
+        dest_host: None,
+        dest_port: None,
+    })
+}
+
 /// `[user@]host[:port]` as used by ProxyJump.
 fn parse_jump_spec(spec: &str) -> (Option<String>, String, Option<u16>) {
     let (user, rest) = match spec.split_once('@') {
@@ -83,6 +128,16 @@ pub fn parse_ssh_config(text: &str, default_user: &str) -> Vec<Connection> {
                     kind: SecretKind::KeyFile,
                 });
             }
+            for (k, v) in &b.options {
+                let f = match k.as_str() {
+                    "localforward" => parse_forward(ForwardKind::Local, v),
+                    "remoteforward" => parse_forward(ForwardKind::Remote, v),
+                    "dynamicforward" => parse_dynamic(v),
+                    _ => None,
+                };
+                c.forwards.extend(f);
+            }
+            c.no_shell = opt(b, "sessiontype").is_some_and(|v| v.eq_ignore_ascii_case("none"));
             by_alias.insert(alias.clone(), conns.len());
             conns.push(c);
         }
@@ -178,6 +233,23 @@ Host far
         assert_eq!(far.jump, [id("gw.example.com"), id("bastion")]);
         let gw = c.iter().find(|c| c.name == "gw.example.com").unwrap();
         assert_eq!((gw.username.as_str(), gw.port), ("jumpy", Some(2200)));
+    }
+
+    #[test]
+    fn imports_forwards_and_session_type_none() {
+        let cfg = "Host tun\n  HostName t.example.com\n  LocalForward 5433 db.internal:5432\n  LocalForward 0.0.0.0:8080 [::1]:80\n  RemoteForward 9000 localhost:3000\n  DynamicForward 1080\n  SessionType none\n  LocalForward broken\n";
+        let c = parse_ssh_config(cfg, "me");
+        let f = &c[0].forwards;
+        assert_eq!(f.len(), 4, "malformed entries are skipped: {f:?}");
+        assert_eq!(f[0], Forward::local(5433, "db.internal", 5432));
+        assert_eq!(
+            (f[1].bind_host.as_str(), f[1].dest_host.as_deref()),
+            ("0.0.0.0", Some("::1"))
+        );
+        assert_eq!(f[2], Forward::remote(9000, "localhost", 3000));
+        assert_eq!(f[3], Forward::dynamic(1080));
+        assert!(c[0].no_shell);
+        assert!(!parse_ssh_config("Host x\n", "me")[0].no_shell);
     }
 
     #[test]
