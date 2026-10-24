@@ -4012,6 +4012,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "simpu-plugin-keepassxc"
+version = "0.1.0"
+dependencies = [
+ "simpu-core",
+ "simpu-plugin-api",
+ "simpu-testkit",
+ "tempfile",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "simpu-testkit"
 version = "0.1.0"
 dependencies = [

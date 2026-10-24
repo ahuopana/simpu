@@ -267,3 +267,19 @@ test.describe("log capture", () => {
     await expect(page.getByTestId("export-note")).toContainText("no capture");
   });
 });
+
+test("each vault provider is unlocked separately", async ({ page }) => {
+  await page.getByTestId("new-conn").click();
+  await page.getByTestId("edit-name").fill("kp");
+  await page.getByTestId("edit-host").fill("kp.example.com");
+  await page.getByTestId("edit-provider").selectOption("keepassxc");
+  await page.getByTestId("edit-item").fill("Servers/kp");
+  await page.getByTestId("edit-save").click();
+  await open(page, "db"); // unlocks bitwarden (helper)
+  await page.getByTestId("conn-kp").dblclick();
+  await expect(page.getByTestId("password-dialog")).toContainText("Unlock keepassxc");
+  await page.getByTestId("password-input").fill("master");
+  await page.getByTestId("password-ok").click();
+  await page.getByTestId("hostkey-trust").click();
+  await expect(page.getByTestId("tab-kp")).toBeVisible();
+});

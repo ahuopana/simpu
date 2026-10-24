@@ -49,6 +49,23 @@ connection, set the secret to provider `bitwarden`, item = the Bitwarden item
 id, kind = `password` (login password) or `keyfile` (private key stored in the
 item's notes). Jump hosts use the same mechanism per hop.
 
+## Using the KeePassXC plugin
+
+Install KeePassXC (it ships `keepassxc-cli`). Before starting Simpu set
+`KEEPASSXC_DB` to the `.kdbx` path (optionally `KEEPASSXC_KEYFILE`,
+`KEEPASSXC_CLI`). In a connection choose provider `keepassxc`; item =
+`Group/Entry` for a password, `Group/Entry#attachment-name` for a private key
+stored as an attachment (kind `keyfile`; without `#` the key is read from Notes).
+The master password is asked in-app on first use.
+
+## Log capture
+
+Use "● Record" on a pane, then "Export log…": everything or the last N commands
+(detected from shell prompts; override the pattern under "advanced"), optional
+anonymization (usernames, hostnames/IPs, passwords/keys, custom regexes) with a
+preview, then copy or save. Passwords Simpu itself knows (vault, prompts) are
+masked before the capture extension sees them (ADR 0007).
+
 ## Debugging CI
 
 Job logs may not be downloadable from restricted environments. The smoke test

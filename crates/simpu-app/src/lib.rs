@@ -220,27 +220,51 @@ pub fn run() {
         .expect("error while running Simpu");
 }
 
-/// Register credential providers. The Bitwarden plugin is started when its
-/// executable sits next to the app and `BW_SESSION` is set (`bw unlock --raw`).
+/// Start a plugin executable that sits next to the app, if it exists.
+fn spawn_plugin(creds: &mut Credentials, file: &str, env: &[(&str, &str)]) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let name = if cfg!(windows) {
+        format!("{file}.exe")
+    } else {
+        file.to_string()
+    };
+    let plugin = exe.with_file_name(name);
+    if !plugin.exists() {
+        return;
+    }
+    match simpu_core::plugin::PluginProvider::spawn(&plugin, env) {
+        Ok(p) => creds.register(Box::new(p)),
+        Err(e) => eprintln!("plugin {file} failed to start: {e}"),
+    }
+}
+
+/// Register credential providers: local key files always; Bitwarden and
+/// KeePassXC when their plugin executable is installed next to the app.
+/// Bitwarden unlocks in-app (or inherits `BW_SESSION`); KeePassXC needs
+/// `KEEPASSXC_DB` (and optionally `KEEPASSXC_KEYFILE`, `KEEPASSXC_CLI`).
 fn load_credentials() -> Credentials {
     let mut creds = Credentials::default();
     creds.register(Box::new(simpu_core::credentials::FileProvider::from_env()));
-    if let (Ok(exe), Ok(session)) = (std::env::current_exe(), std::env::var("BW_SESSION")) {
-        let name = if cfg!(windows) {
-            "simpu-plugin-bitwarden.exe"
-        } else {
-            "simpu-plugin-bitwarden"
-        };
-        let plugin = exe.with_file_name(name);
-        if plugin.exists() {
-            match simpu_core::plugin::PluginProvider::spawn(
-                &plugin,
-                &[("BW_SESSION", session.as_str())],
-            ) {
-                Ok(p) => creds.register(Box::new(p)),
-                Err(e) => eprintln!("bitwarden plugin failed to start: {e}"),
-            }
-        }
+    let bw_session = std::env::var("BW_SESSION").unwrap_or_default();
+    spawn_plugin(
+        &mut creds,
+        "simpu-plugin-bitwarden",
+        &[("BW_SESSION", bw_session.as_str())],
+    );
+    if let Ok(db) = std::env::var("KEEPASSXC_DB") {
+        let key = std::env::var("KEEPASSXC_KEYFILE").unwrap_or_default();
+        let cli = std::env::var("KEEPASSXC_CLI").unwrap_or_else(|_| "keepassxc-cli".into());
+        spawn_plugin(
+            &mut creds,
+            "simpu-plugin-keepassxc",
+            &[
+                ("KEEPASSXC_DB", db.as_str()),
+                ("KEEPASSXC_KEYFILE", key.as_str()),
+                ("KEEPASSXC_CLI", cli.as_str()),
+            ],
+        );
     }
     creds
 }

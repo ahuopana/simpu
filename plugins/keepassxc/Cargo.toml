@@ -1,0 +1,28 @@
+[package]
+name = "simpu-plugin-keepassxc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Simpu credential provider backed by keepassxc-cli"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "simpu-plugin-keepassxc"
+path = "src/main.rs"
+
+[[bin]]
+name = "fake-keepassxc-cli"
+path = "src/bin/fake_keepassxc_cli.rs"
+
+[dependencies]
+simpu-plugin-api = { path = "../../crates/simpu-plugin-api" }
+zeroize = "1"
+
+[dev-dependencies]
+simpu-core = { path = "../../crates/simpu-core" }
+simpu-testkit = { path = "../../crates/simpu-testkit" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tempfile = "3"

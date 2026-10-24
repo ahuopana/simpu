@@ -14,7 +14,9 @@ plugin work in tests; there is no release yet.
 - Multiple sessions in tabs; split panes
 - Drag-and-drop file transfer
 - Jump host chains, with credentials from a password manager
-- Plugins; the first one reads passwords and key files from Bitwarden
+- Plugins: Bitwarden and KeePassXC supply passwords and key files
+- Log capture: record a session, export the last N commands or everything,
+  with optional anonymization of usernames, hosts and secrets
 
 ## Install
 

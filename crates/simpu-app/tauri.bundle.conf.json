@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "resources": {
+      "../../target/release/simpu-plugin-bitwarden.exe": "simpu-plugin-bitwarden.exe",
+      "../../target/release/simpu-plugin-keepassxc.exe": "simpu-plugin-keepassxc.exe"
+    }
+  }
+}

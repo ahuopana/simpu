@@ -49,7 +49,7 @@ export class MockBackend implements Backend {
   /** Passwords entered by the user, for assertions in tests. */
   enteredPasswords: string[] = [];
   /** Mock Bitwarden: locked until the master password "master" is entered. */
-  vaultUnlocked = false;
+  unlockedVaults = new Set<string>();
   private pendingPrompt = new Map<string, (trust: boolean) => void>();
   private n = 0;
   /** Connections to which the user has already trusted the host key. */
@@ -162,14 +162,15 @@ export class MockBackend implements Backend {
     if (!conn) throw new Error("unknown connection");
     this.n++;
     let unlockError: string | null = null;
-    while (conn.secret?.provider === "bitwarden" && !this.vaultUnlocked) {
+    const provider = conn.secret?.provider ?? "";
+    while (["bitwarden", "keepassxc"].includes(provider) && !this.unlockedVaults.has(provider)) {
       const promptId = `u${++this.n}`;
       const pw = await new Promise<string | null>((res) => {
         this.pendingCred.set(promptId, res);
-        this.credPrompts.emit({ promptId, kind: "unlock", provider: "bitwarden", error: unlockError, hop: conn.name, username: "", host: "" });
+        this.credPrompts.emit({ promptId, kind: "unlock", provider, error: unlockError, hop: conn.name, username: "", host: "" });
       });
-      if (pw === null) throw new Error("bitwarden is locked (unlock cancelled)");
-      if (pw === "master") this.vaultUnlocked = true;
+      if (pw === null) throw new Error(`${provider} is locked (unlock cancelled)`);
+      if (pw === "master") this.unlockedVaults.add(provider);
       else unlockError = "Wrong master password";
     }
     if (!conn.secret && conn.protocol !== "telnet") {

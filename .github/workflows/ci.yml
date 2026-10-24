@@ -106,8 +106,12 @@ jobs:
           cache-dependency-path: ui/package-lock.json
       - run: npm ci
         working-directory: ui
+      - name: Build plugin executables (bundled next to the app)
+        run: cargo build --release -p simpu-plugin-bitwarden -p simpu-plugin-keepassxc
       - name: Build NSIS installer
-        run: ../../ui/node_modules/.bin/tauri build
+        # tauri.bundle.conf.json adds the plugins as resources; it is a separate file so that
+        # plain `cargo build/test` does not require the release plugins to exist.
+        run: ../../ui/node_modules/.bin/tauri build --config tauri.bundle.conf.json
         working-directory: crates/simpu-app
       - uses: actions/upload-artifact@v4
         with:

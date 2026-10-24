@@ -263,3 +263,14 @@ impl TestServer {
         }
     }
 }
+
+/// A fresh ed25519 key: `(private key in OpenSSH PEM format, OpenSSH public key line)`.
+pub fn fresh_ed25519() -> (String, String) {
+    let key = russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
+        .expect("key");
+    let pem = key
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .expect("pem")
+        .to_string();
+    (pem, key.public_key().to_openssh().expect("public"))
+}

@@ -98,7 +98,7 @@ function openEditor(existing?: ConnectionDto) {
     <span class="err" data-err="port"></span>
     <label>User</label><input name="username" data-testid="edit-user" />
     <label>Secret from</label><select name="provider" data-testid="edit-provider">
-      <option value="">(ask / none)</option><option>bitwarden</option></select>
+      <option value="">(ask / none)</option><option>bitwarden</option><option>keepassxc</option><option>file</option></select>
     <label>Secret item</label><input name="item" data-testid="edit-item" placeholder="item id" />
     <span class="err" data-err="secret"></span>
     <label>Secret kind</label><select name="kind" data-testid="edit-kind"><option>password</option><option>keyfile</option></select>
