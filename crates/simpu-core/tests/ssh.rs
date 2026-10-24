@@ -270,3 +270,64 @@ async fn keyfile_secret_from_vault_is_used_for_key_auth() {
         .await
         .unwrap();
 }
+
+fn quick_keepalive() -> simpu_core::ssh::ConnectOptions {
+    simpu_core::ssh::ConnectOptions {
+        keepalive_interval: Some(std::time::Duration::from_millis(150)),
+        keepalive_max: 2,
+    }
+}
+
+#[tokio::test]
+async fn server_dropping_the_connection_is_reported() {
+    let s = TestServer::start("srv", "alice", "pw").await;
+    let session = SshSession::connect(
+        &[hop("srv", s.port, "alice", "pw")],
+        known(),
+        always_trust(),
+    )
+    .await
+    .unwrap();
+    assert!(!session.is_closed());
+    s.kill_connections();
+    tokio::time::timeout(std::time::Duration::from_secs(5), session.closed())
+        .await
+        .expect("closed signal");
+    assert!(session.is_closed());
+}
+
+#[tokio::test]
+async fn keepalive_detects_a_silently_dead_link() {
+    let s = TestServer::start("srv", "alice", "pw").await;
+    let hole = simpu_testkit::net::Blackhole::start(s.port).await;
+    let session = SshSession::connect_with(
+        &[hop("srv", hole.port, "alice", "pw")],
+        known(),
+        always_trust(),
+        &quick_keepalive(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(session.exec("ping").await.unwrap().exit_status, Some(0));
+    assert!(!session.is_closed());
+    hole.pause(); // no FIN, no RST: packets just vanish
+    tokio::time::timeout(std::time::Duration::from_secs(10), session.closed())
+        .await
+        .expect("keepalive should give up within interval x max");
+}
+
+#[tokio::test]
+async fn a_healthy_idle_session_stays_open_with_keepalives() {
+    let s = TestServer::start("srv", "alice", "pw").await;
+    let session = SshSession::connect_with(
+        &[hop("srv", s.port, "alice", "pw")],
+        known(),
+        always_trust(),
+        &quick_keepalive(),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+    assert!(!session.is_closed());
+    assert!(session.exec("still here").await.is_ok());
+}

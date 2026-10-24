@@ -7,10 +7,13 @@ use crate::model::{Connection, SecretKind, Tree};
 use russh::client::{self, Handle};
 use russh::keys::PublicKeyOrCertificate;
 use russh::{Channel, ChannelMsg};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::watch;
 
 /// How to authenticate to one hop.
 pub enum HopAuth {
@@ -126,7 +129,30 @@ pub fn never_trust() -> HostKeyPolicy {
     Arc::new(|_| Box::pin(async { false }))
 }
 
+/// Remote (`-R`) forwards of a session: `(bind host, bind port)` -> local destination.
+pub type RemoteForwards = Arc<Mutex<HashMap<(String, u32), (String, u16)>>>;
+
+/// Transport tuning.
+#[derive(Debug, Clone)]
+pub struct ConnectOptions {
+    /// Send an SSH keepalive this often (None disables).
+    pub keepalive_interval: Option<Duration>,
+    /// Give up after this many unanswered keepalives.
+    pub keepalive_max: usize,
+}
+
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self {
+            keepalive_interval: Some(Duration::from_secs(30)),
+            keepalive_max: 3,
+        }
+    }
+}
+
 struct ClientHandler {
+    remote: RemoteForwards,
+    closed: Arc<watch::Sender<bool>>,
     host: String,
     port: u16,
     known: Arc<Mutex<KnownHosts>>,
@@ -136,6 +162,42 @@ struct ClientHandler {
 
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
+
+    async fn disconnected(
+        &mut self,
+        _reason: russh::client::DisconnectReason<Self::Error>,
+    ) -> Result<(), Self::Error> {
+        // Whatever the reason, the transport is gone; supervisors watch this.
+        self.closed.send_replace(true);
+        Ok(())
+    }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let dest = lock(&self.remote)
+            .get(&(connected_address.to_string(), connected_port))
+            .cloned();
+        let Some((host, port)) = dest else {
+            return Ok(());
+        }; // dropping `reply` rejects
+        let Ok(mut local) = tokio::net::TcpStream::connect((host.as_str(), port)).await else {
+            return Ok(());
+        };
+        reply.accept().await;
+        tokio::spawn(async move {
+            let mut remote = channel.into_stream();
+            let _ = tokio::io::copy_bidirectional(&mut remote, &mut local).await;
+        });
+        Ok(())
+    }
 
     async fn check_server_key(
         &mut self,
@@ -187,6 +249,8 @@ pub struct ExecOutput {
 pub struct SshSession {
     handle: Handle<ClientHandler>,
     _jumps: Vec<Handle<ClientHandler>>,
+    remote: RemoteForwards,
+    closed: watch::Receiver<bool>,
 }
 
 impl SshSession {
@@ -196,7 +260,24 @@ impl SshSession {
         known: Arc<Mutex<KnownHosts>>,
         policy: HostKeyPolicy,
     ) -> Result<Self, SshError> {
-        let config = Arc::new(client::Config::default());
+        Self::connect_with(hops, known, policy, &ConnectOptions::default()).await
+    }
+
+    /// Like [`connect`](Self::connect) with explicit transport options.
+    pub async fn connect_with(
+        hops: &[Hop],
+        known: Arc<Mutex<KnownHosts>>,
+        policy: HostKeyPolicy,
+        opts: &ConnectOptions,
+    ) -> Result<Self, SshError> {
+        let config = Arc::new(client::Config {
+            keepalive_interval: opts.keepalive_interval,
+            keepalive_max: opts.keepalive_max,
+            ..Default::default()
+        });
+        let remote: RemoteForwards = Arc::default();
+        let (closed_tx, closed_rx) = watch::channel(false);
+        let closed_tx = Arc::new(closed_tx);
         let mut sessions: Vec<Handle<ClientHandler>> = Vec::new();
         for (index, hop) in hops.iter().enumerate() {
             let err = |kind| SshError {
@@ -206,6 +287,8 @@ impl SshSession {
             };
             let failure = Arc::new(Mutex::new(None));
             let handler = ClientHandler {
+                remote: remote.clone(),
+                closed: closed_tx.clone(),
                 host: hop.host.clone(),
                 port: hop.port,
                 known: known.clone(),
@@ -284,7 +367,82 @@ impl SshSession {
         Ok(Self {
             handle,
             _jumps: sessions,
+            remote,
+            closed: closed_rx,
         })
+    }
+
+    /// True once the transport (of the target or any jump host) is gone.
+    pub fn is_closed(&self) -> bool {
+        *self.closed.borrow() || self.handle.is_closed()
+    }
+
+    /// Resolves when the connection is lost (keepalive timeout, server disconnect, I/O error).
+    pub async fn closed(&self) {
+        let mut rx = self.closed.clone();
+        while !*rx.borrow() {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+
+    /// Open a `direct-tcpip` channel (local and dynamic forwards, jump hosts).
+    pub async fn open_direct_tcpip(
+        &self,
+        host: &str,
+        port: u16,
+        origin: &str,
+    ) -> Result<russh::ChannelStream<client::Msg>, russh::Error> {
+        let ch = self
+            .handle
+            .channel_open_direct_tcpip(host, u32::from(port), origin, 0)
+            .await?;
+        Ok(ch.into_stream())
+    }
+
+    /// Ask the server to listen on `bind_host:bind_port` and send connections to
+    /// `dest_host:dest_port` from this machine. Returns the port actually bound.
+    pub async fn request_remote_forward(
+        &self,
+        bind_host: &str,
+        bind_port: u16,
+        dest_host: &str,
+        dest_port: u16,
+    ) -> Result<u16, russh::Error> {
+        // Register first: connections may arrive right after the server confirms.
+        let key_port = u32::from(bind_port);
+        lock(&self.remote).insert(
+            (bind_host.to_string(), key_port),
+            (dest_host.to_string(), dest_port),
+        );
+        match self.handle.tcpip_forward(bind_host, key_port).await {
+            Ok(actual) => {
+                let actual = if actual == 0 { key_port } else { actual };
+                if actual != key_port {
+                    let mut r = lock(&self.remote);
+                    if let Some(v) = r.remove(&(bind_host.to_string(), key_port)) {
+                        r.insert((bind_host.to_string(), actual), v);
+                    }
+                }
+                Ok(actual as u16)
+            }
+            Err(e) => {
+                lock(&self.remote).remove(&(bind_host.to_string(), key_port));
+                Err(e)
+            }
+        }
+    }
+
+    pub async fn cancel_remote_forward(
+        &self,
+        bind_host: &str,
+        bind_port: u16,
+    ) -> Result<(), russh::Error> {
+        lock(&self.remote).remove(&(bind_host.to_string(), u32::from(bind_port)));
+        self.handle
+            .cancel_tcpip_forward(bind_host, u32::from(bind_port))
+            .await
     }
 
     /// Run a command and collect stdout.

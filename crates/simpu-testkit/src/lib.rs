@@ -1,6 +1,7 @@
 //! In-process SSH server for tests: password auth, `exec`, and direct-tcpip
 //! forwarding (so jump host chains can be tested without Docker).
 
+pub mod net;
 pub mod sftp;
 
 use russh::server::{self, Auth, Msg, Server as _, Session};
@@ -10,14 +11,37 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 
 pub struct TestServer {
     pub port: u16,
     pub forwards: Arc<AtomicUsize>,
     pub host_key_line: String,
+    kill: watch::Sender<u64>,
+}
+
+impl TestServer {
+    /// Disconnect every connected client (the server keeps listening), like a network drop
+    /// or server restart. Clients see a closed connection.
+    pub fn kill_connections(&self) {
+        self.kill.send_modify(|g| *g += 1);
+    }
+}
+
+/// Aborts tasks when the SSH connection handler goes away.
+struct Tasks(Vec<tokio::task::JoinHandle<()>>);
+
+impl Drop for Tasks {
+    fn drop(&mut self) {
+        for t in &self.0 {
+            t.abort();
+        }
+    }
 }
 
 struct Handler {
+    kill: watch::Receiver<u64>,
+    remote_listeners: Tasks,
     label: String,
     user: String,
     password: String,
@@ -33,6 +57,8 @@ struct Handler {
 impl Clone for Handler {
     fn clone(&self) -> Self {
         Self {
+            kill: self.kill.clone(),
+            remote_listeners: Tasks(Vec::new()),
             label: self.label.clone(),
             user: self.user.clone(),
             password: self.password.clone(),
@@ -54,6 +80,67 @@ impl server::Server for Handler {
 
 impl server::Handler for Handler {
     type Error = russh::Error;
+
+    async fn auth_succeeded(&mut self, session: &mut Session) -> Result<(), Self::Error> {
+        let handle = session.handle();
+        let mut rx = self.kill.clone();
+        let generation = *rx.borrow();
+        tokio::spawn(async move {
+            while rx.changed().await.is_ok() {
+                if *rx.borrow() != generation {
+                    let _ = handle
+                        .disconnect(
+                            russh::Disconnect::ByApplication,
+                            "killed by test".into(),
+                            "en".into(),
+                        )
+                        .await;
+                    break;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Remote forwarding (`-R`): listen locally on behalf of the client and open
+    /// `forwarded-tcpip` channels for every accepted connection.
+    async fn tcpip_forward(
+        &mut self,
+        address: &str,
+        port: &mut u32,
+        session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        let Ok(listener) = TcpListener::bind(("127.0.0.1", *port as u16)).await else {
+            return Ok(false);
+        };
+        let actual = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+        *port = u32::from(actual);
+        let handle = session.handle();
+        let address = address.to_string();
+        let task = tokio::spawn(async move {
+            while let Ok((mut sock, peer)) = listener.accept().await {
+                let handle = handle.clone();
+                let address = address.clone();
+                tokio::spawn(async move {
+                    let Ok(channel) = handle
+                        .channel_open_forwarded_tcpip(
+                            address,
+                            u32::from(actual),
+                            peer.ip().to_string(),
+                            u32::from(peer.port()),
+                        )
+                        .await
+                    else {
+                        return;
+                    };
+                    let mut stream = channel.into_stream();
+                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut sock).await;
+                });
+            }
+        });
+        self.remote_listeners.0.push(task);
+        Ok(true)
+    }
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
         if user == self.user && password == self.password {
@@ -243,7 +330,10 @@ impl TestServer {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let forwards = Arc::new(AtomicUsize::new(0));
+        let (kill, kill_rx) = watch::channel(0u64);
         let mut h = Handler {
+            kill: kill_rx,
+            remote_listeners: Tasks(Vec::new()),
             label: label.into(),
             user: user.into(),
             password: password.into(),
@@ -260,6 +350,7 @@ impl TestServer {
             port,
             forwards,
             host_key_line,
+            kill,
         }
     }
 }
