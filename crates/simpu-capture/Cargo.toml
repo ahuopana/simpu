@@ -1,0 +1,20 @@
+[package]
+name = "simpu-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Simpu log-capture extension: record, last-N commands, anonymized export"
+
+[lints]
+workspace = true
+
+[dependencies]
+simpu-core = { path = "../simpu-core" }
+regex = "1"
+thiserror = "2"
+
+[dev-dependencies]
+simpu-testkit = { path = "../simpu-testkit" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tempfile = "3"
