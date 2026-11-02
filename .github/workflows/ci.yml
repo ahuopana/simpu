@@ -60,7 +60,7 @@ jobs:
           code=$?
           if [ "$code" != 0 ]; then
             # Job logs are not always readable from outside; surface the first errors as an annotation.
-            msg=$(grep -E '^(error|warning)' -A6 clippy.log | head -n 40 | tr -c '[:alnum:] :._/-' '_' | head -c 1500)
+            msg=$(tail -n 40 clippy.log | tr -c '[:alnum:] :._/-' '_' | head -c 2500)
             echo "::error title=clippyfailed::${msg}"
             exit $code
           fi
