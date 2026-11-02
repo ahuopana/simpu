@@ -420,14 +420,17 @@ impl SshSession {
                 HopAuth::Agent {
                     endpoint,
                     fingerprint,
-                } => authenticate_with_agent(
+                } => match authenticate_with_agent(
                     &mut handle,
                     &hop.username,
                     endpoint,
                     fingerprint.as_deref(),
                 )
                 .await
-                .map_err(&err)?,
+                {
+                    Ok(accepted) => accepted,
+                    Err(kind) => return Err(err(kind)),
+                },
                 HopAuth::Key { pem, passphrase } => {
                     let key = russh::keys::decode_secret_key(
                         pem.expose(),
