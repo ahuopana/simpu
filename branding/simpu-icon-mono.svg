@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Simpu">
+  <!-- Single-colour mark for tiny sizes (favicon, tray): shell silhouette + pearl, no prompt glyph. Uses currentColor. -->
+  <path d="M26 152C26 96 84 56 150 56C197 56 231 84 234 120C235 134 226 144 212 146L40 170C31 170 26 162 26 152Z" fill="currentColor"/>
+  <path d="M40 176L212 152C226 150 234 158 230 170C222 202 178 216 130 216C80 216 46 202 40 176Z" fill="currentColor" opacity=".75"/>
+  <circle cx="150" cy="164" r="27" fill="currentColor" stroke="#fff" stroke-width="6" paint-order="stroke"/>
+</svg>
