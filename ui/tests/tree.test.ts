@@ -75,6 +75,8 @@ describe("tree editing", () => {
     expect(validate(conn("a", { port: 70000 })).port).toBeDefined();
     expect(validate(conn("a", { port: 22 })).port).toBeUndefined();
     expect(validate(conn("a", { secret: { provider: "bitwarden", item: "", kind: "password" } })).secret).toBeDefined();
+    // the agent needs no item (optional fingerprint)
+    expect(validate(conn("a", { secret: { provider: "agent", item: "", kind: "keyfile" } })).secret).toBeUndefined();
   });
 });
 

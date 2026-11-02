@@ -332,3 +332,34 @@ async fn a_healthy_idle_session_stays_open_with_keepalives() {
     assert!(!session.is_closed());
     assert!(session.exec("still here").await.is_ok());
 }
+
+#[test]
+fn check_key_distinguishes_missing_wrong_and_right_passphrase() {
+    use simpu_core::ssh::{check_key, KeyCheck};
+    let (plain, _) = simpu_testkit::fresh_ed25519();
+    assert_eq!(check_key(&plain, None), KeyCheck::Ok);
+    let (enc, _) = simpu_testkit::fresh_ed25519_encrypted("correct horse");
+    assert_eq!(check_key(&enc, None), KeyCheck::NeedsPassphrase);
+    assert_eq!(check_key(&enc, Some("nope")), KeyCheck::WrongPassphrase);
+    assert_eq!(check_key(&enc, Some("correct horse")), KeyCheck::Ok);
+    assert!(matches!(check_key("not a key", None), KeyCheck::Invalid(_)));
+}
+
+#[tokio::test]
+async fn encrypted_key_with_passphrase_authenticates() {
+    let (pem, public) = simpu_testkit::fresh_ed25519_encrypted("s3cret phrase");
+    let s = TestServer::start_full("srv", "alice", "unused", None, Some(public)).await;
+    let hop = Hop {
+        name: "keyed".into(),
+        host: "127.0.0.1".into(),
+        port: s.port,
+        username: "alice".into(),
+        auth: HopAuth::Key {
+            pem: Secret::new(pem),
+            passphrase: Some(Secret::new("s3cret phrase")),
+        },
+    };
+    assert!(SshSession::connect(&[hop], known(), always_trust())
+        .await
+        .is_ok());
+}

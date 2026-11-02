@@ -365,3 +365,16 @@ pub fn fresh_ed25519() -> (String, String) {
         .to_string();
     (pem, key.public_key().to_openssh().expect("public"))
 }
+
+/// Like [`fresh_ed25519`] but the private key is encrypted with `passphrase`.
+pub fn fresh_ed25519_encrypted(passphrase: &str) -> (String, String) {
+    let key = russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
+        .expect("key");
+    let public = key.public_key().to_openssh().expect("public");
+    let enc = key.encrypt(&mut rand::rng(), passphrase).expect("encrypt");
+    let pem = enc
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .expect("pem")
+        .to_string();
+    (pem, public)
+}

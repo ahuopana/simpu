@@ -245,6 +245,19 @@ export class MockBackend implements Backend {
       if (pw === "master") this.unlockedVaults.add(provider);
       else unlockError = "Wrong master password";
     }
+    if (conn.secret?.provider === "file" && conn.secret.item.includes("encrypted")) {
+      let err: string | null = null;
+      for (;;) {
+        const promptId = `k${++this.n}`;
+        const pw = await new Promise<string | null>((res) => {
+          this.pendingCred.set(promptId, res);
+          this.credPrompts.emit({ promptId, kind: "passphrase", error: err, hop: conn.name, username: conn.username, host: conn.host });
+        });
+        if (pw === null) throw new Error(`${conn.name}: passphrase entry cancelled`);
+        if (pw === "pass") break;
+        err = "Wrong passphrase";
+      }
+    }
     if (!conn.secret && conn.protocol !== "telnet") {
       const promptId = `c${this.n}`;
       const secret = await new Promise<string | null>((res) => {

@@ -3976,6 +3976,7 @@ dependencies = [
 name = "simpu-core"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "rand",
  "russh",
  "russh-sftp",

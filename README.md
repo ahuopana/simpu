@@ -15,6 +15,7 @@ plugin work in tests; there is no release yet.
 - Connection tree: name, host, user, protocol, folders, search
 - Multiple sessions in tabs; split panes
 - Drag-and-drop file transfer
+- Authentication: passwords, key files (with passphrase prompts), ssh-agent / Pageant
 - Jump host chains, with credentials from a password manager
 - Port forwarding (local, remote, SOCKS5), tunnel-only connections
 - Keepalive and per-connection reconnect policy (automatic, ask, or close)

@@ -385,3 +385,96 @@ async fn extensions_see_output_with_known_passwords_masked_but_the_terminal_does
         "terminal output is unchanged"
     );
 }
+
+#[tokio::test]
+async fn encrypted_key_file_asks_for_the_passphrase_and_retries_when_wrong() {
+    let (pem, public) = simpu_testkit::fresh_ed25519_encrypted("open sesame");
+    let server = TestServer::start_full("srv", "alice", "unused", None, Some(public)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let key_path = dir.path().join("id_ed25519");
+    std::fs::write(&key_path, &pem).unwrap();
+
+    let mut conn = Connection::new("keyed", Protocol::Ssh, "127.0.0.1", "alice");
+    conn.port = Some(server.port);
+    conn.secret = Some(SecretRef {
+        provider: "file".into(),
+        item: key_path.to_string_lossy().into(),
+        kind: SecretKind::KeyFile,
+    });
+    let mut creds = Credentials::default();
+    creds.register(Box::new(simpu_core::credentials::FileProvider::new(None)));
+    let events = Arc::new(Fake::default());
+    let cfg = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(Manager::new(events.clone(), cfg.path().to_path_buf(), creds).unwrap());
+    mgr.save_tree(Tree {
+        nodes: vec![Node::Connection(conn.clone())],
+    })
+    .unwrap();
+
+    let (m, ev) = (mgr.clone(), events.clone());
+    let driver = tokio::spawn(async move {
+        let mut answers = vec!["wrong", "open sesame"].into_iter();
+        let (mut errors, mut trusted) = (Vec::new(), false);
+        while errors.len() < 2 || !trusted {
+            let p = ev.cred_prompts.lock().unwrap().pop();
+            if let Some(p) = p {
+                assert_eq!((p.kind.as_str(), p.hop.as_str()), ("passphrase", "keyed"));
+                errors.push(p.error.clone());
+                m.answer_credential(&p.prompt_id, answers.next().map(String::from));
+            }
+            let h = ev.prompts.lock().unwrap().pop();
+            if let Some(h) = h {
+                m.answer_host_key(&h.prompt_id, true);
+                trusted = true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        errors
+    });
+    mgr.open("s1", &conn.id.to_string(), 80, 24).await.unwrap();
+    assert_eq!(
+        driver.await.unwrap(),
+        [None, Some("Wrong passphrase".to_string())]
+    );
+    until("pty banner", || {
+        events.data.lock().unwrap().contains("pty 80x24")
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn cancelling_the_passphrase_prompt_fails_cleanly() {
+    let (pem, public) = simpu_testkit::fresh_ed25519_encrypted("pw");
+    let server = TestServer::start_full("srv", "alice", "unused", None, Some(public)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let key_path = dir.path().join("k");
+    std::fs::write(&key_path, &pem).unwrap();
+    let mut conn = Connection::new("keyed", Protocol::Ssh, "127.0.0.1", "alice");
+    conn.port = Some(server.port);
+    conn.secret = Some(SecretRef {
+        provider: "file".into(),
+        item: key_path.to_string_lossy().into(),
+        kind: SecretKind::KeyFile,
+    });
+    let mut creds = Credentials::default();
+    creds.register(Box::new(simpu_core::credentials::FileProvider::new(None)));
+    let events = Arc::new(Fake::default());
+    let cfg = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(Manager::new(events.clone(), cfg.path().to_path_buf(), creds).unwrap());
+    mgr.save_tree(Tree {
+        nodes: vec![Node::Connection(conn.clone())],
+    })
+    .unwrap();
+    let (m, ev) = (mgr.clone(), events.clone());
+    let t = tokio::spawn(async move {
+        until("prompt", || !ev.cred_prompts.lock().unwrap().is_empty()).await;
+        let p = ev.cred_prompts.lock().unwrap().remove(0);
+        m.answer_credential(&p.prompt_id, None);
+    });
+    let err = mgr
+        .open("s1", &conn.id.to_string(), 80, 24)
+        .await
+        .unwrap_err();
+    t.await.unwrap();
+    assert!(err.contains("passphrase entry cancelled"), "{err}");
+}

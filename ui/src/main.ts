@@ -99,8 +99,8 @@ function openEditor(existing?: ConnectionDto) {
     <span class="err" data-err="port"></span>
     <label>User</label><input name="username" data-testid="edit-user" />
     <label>Secret from</label><select name="provider" data-testid="edit-provider">
-      <option value="">(ask / none)</option><option>bitwarden</option><option>keepassxc</option><option>file</option></select>
-    <label>Secret item</label><input name="item" data-testid="edit-item" placeholder="item id" />
+      <option value="">(ask / none)</option><option>bitwarden</option><option>keepassxc</option><option>file</option><option value="agent">ssh-agent / Pageant</option></select>
+    <label>Secret item</label><input name="item" data-testid="edit-item" placeholder="item id; for ssh-agent: optional key fingerprint (SHA256:…)" />
     <span class="err" data-err="secret"></span>
     <label>Secret kind</label><select name="kind" data-testid="edit-kind"><option>password</option><option>keyfile</option></select>
     <label>Jump hosts</label><select name="jump" data-testid="edit-jump" multiple size="3">
@@ -712,11 +712,13 @@ backend.onCredentialPrompt((p) => {
   const m = $("modal");
   m.hidden = false;
   m.innerHTML = `<form class="box" data-testid="password-dialog">
-    <h3>${p.kind === "unlock" ? `Unlock ${esc(p.provider ?? "vault")}` : "Password required"}</h3>
+    <h3>${p.kind === "unlock" ? `Unlock ${esc(p.provider ?? "vault")}` : p.kind === "passphrase" ? "Key passphrase required" : "Password required"}</h3>
     <div>${
       p.kind === "unlock"
         ? `Master password needed to read credentials for ${esc(p.hop)}.`
-        : `${esc(p.username)}@${esc(p.host)} (${esc(p.hop)})`
+        : p.kind === "passphrase"
+          ? `The private key for ${esc(p.username)}@${esc(p.host)} (${esc(p.hop)}) is encrypted.`
+          : `${esc(p.username)}@${esc(p.host)} (${esc(p.hop)})`
     }</div>
     ${p.error ? `<div class="err" data-testid="password-error">${esc(p.error)}</div>` : ""}
     <input type="password" name="pw" data-testid="password-input" autocomplete="off" style="margin:8px 0;width:100%" />

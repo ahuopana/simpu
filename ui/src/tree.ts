@@ -100,7 +100,7 @@ export function validate(c: ConnectionDto): FormErrors {
   if (!c.name.trim()) e.name = "Name is required";
   if (!c.host.trim()) e.host = "Host is required";
   if (c.port !== undefined && (!Number.isInteger(c.port) || c.port < 1 || c.port > 65535)) e.port = "Port must be 1-65535";
-  if (c.secret && !c.secret.item.trim()) e.secret = "Secret item is required when a provider is set";
+  if (c.secret && c.secret.provider !== "agent" && !c.secret.item.trim()) e.secret = "Secret item is required when a provider is set";
   return e;
 }
 

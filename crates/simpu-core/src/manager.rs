@@ -10,8 +10,8 @@ use crate::model::{Folder, Forward, Node, Protocol, ReconnectPolicy, Tree};
 use crate::redact::{SecretSet, StreamRedactor};
 use crate::sftp::{Progress, Sftp};
 use crate::ssh::{
-    plan_hops, ConnectOptions, ErrorKind, Hop, HopAuth, HostKeyPolicy, HostKeyPrompt, PlanError,
-    Shell, ShellEvent, SshError, SshSession,
+    check_key, plan_hops, ConnectOptions, ErrorKind, Hop, HopAuth, HostKeyPolicy, HostKeyPrompt,
+    KeyCheck, PlanError, Shell, ShellEvent, SshError, SshSession,
 };
 use crate::telnet::{TelnetEvent, TelnetSession, TelnetWriter};
 use serde::Serialize;
@@ -310,6 +310,52 @@ impl<E: Events> Manager<E> {
             .ok_or_else(|| format!("{}: password entry cancelled", hop.name))
     }
 
+    /// Ask for the passphrase of every encrypted private key (3 tries each).
+    async fn unlock_keys(&self, hops: &mut [Hop]) -> Result<(), String> {
+        for hop in hops.iter_mut() {
+            let HopAuth::Key { pem, passphrase } = &mut hop.auth else {
+                continue;
+            };
+            if passphrase.is_some() {
+                continue;
+            }
+            let mut error = None;
+            let mut attempts = 0;
+            loop {
+                match check_key(pem.expose(), passphrase.as_ref().map(|p| p.expose())) {
+                    KeyCheck::Ok => break,
+                    KeyCheck::Invalid(m) => {
+                        return Err(format!("{}: unusable private key: {m}", hop.name))
+                    }
+                    state => {
+                        if state == KeyCheck::WrongPassphrase {
+                            error = Some("Wrong passphrase".to_string());
+                        }
+                        attempts += 1;
+                        if attempts > 3 {
+                            return Err(format!("{}: too many wrong passphrases", hop.name));
+                        }
+                        let info = CredentialPromptInfo {
+                            prompt_id: String::new(),
+                            kind: "passphrase".into(),
+                            provider: None,
+                            error: error.take(),
+                            hop: hop.name.clone(),
+                            username: hop.username.clone(),
+                            host: hop.host.clone(),
+                        };
+                        let p = self
+                            .ask(info)
+                            .await
+                            .ok_or_else(|| format!("{}: passphrase entry cancelled", hop.name))?;
+                        *passphrase = Some(p);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Plan hops, unlocking a locked vault by asking for the master password (3 tries).
     async fn plan_with_unlock(
         &self,
@@ -447,6 +493,7 @@ impl<E: Events> Manager<E> {
                 hop.auth = HopAuth::Password(self.ask_password(hop).await?);
             }
         }
+        self.unlock_keys(&mut hops).await?;
         for hop in &hops {
             match &hop.auth {
                 HopAuth::Password(p) => self.secrets.add(p),
@@ -456,7 +503,7 @@ impl<E: Events> Manager<E> {
                         self.secrets.add(p);
                     }
                 }
-                HopAuth::None => {}
+                HopAuth::None | HopAuth::Agent { .. } => {}
             }
         }
         self.events

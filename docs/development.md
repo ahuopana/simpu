@@ -49,6 +49,14 @@ connection, set the secret to provider `bitwarden`, item = the Bitwarden item
 id, kind = `password` (login password) or `keyfile` (private key stored in the
 item's notes). Jump hosts use the same mechanism per hop.
 
+## Keys, passphrases and ssh-agent
+
+- Local key file: provider `file`, item = path (`~/.ssh/id_ed25519`), kind key file. If the key is
+  encrypted Simpu asks for the passphrase when connecting.
+- ssh-agent / Pageant: provider `ssh-agent / Pageant` (`agent`). Item is empty, or a fingerprint
+  (`SHA256:...`, from `ssh-add -l`) to pick one key. On Windows start the "OpenSSH Authentication Agent"
+  service (or Pageant) and add keys with `ssh-add`.
+
 ## Using the KeePassXC plugin
 
 Install KeePassXC (it ships `keepassxc-cli`). Before starting Simpu set

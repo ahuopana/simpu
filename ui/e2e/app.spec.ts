@@ -399,3 +399,37 @@ test.describe("forwards and reconnect", () => {
     await expect(page.getByTestId("statusbar")).toBeHidden();
   });
 });
+
+test.describe("keys and agent", () => {
+  async function create(page: Page, provider: string, item: string) {
+    await page.getByTestId("new-conn").click();
+    await page.getByTestId("edit-name").fill("keyed");
+    await page.getByTestId("edit-host").fill("keyed.example.com");
+    await page.getByTestId("edit-provider").selectOption(provider);
+    if (item) await page.getByTestId("edit-item").fill(item);
+    await page.getByTestId("edit-save").click();
+  }
+
+  test("ssh-agent needs no item and connects without prompts", async ({ page }) => {
+    await create(page, "agent", "");
+    const tree = await page.evaluate(() => (window as any).__simpu.backend.tree);
+    expect(tree.find((n: any) => n.name === "keyed").secret).toMatchObject({ provider: "agent", item: "" });
+    await page.getByTestId("conn-keyed").dblclick();
+    await page.getByTestId("hostkey-trust").click();
+    await expect.poll(() => screen(page)).toContain("Connected to");
+    await expect(page.getByTestId("password-dialog")).toHaveCount(0);
+  });
+
+  test("encrypted key file asks for the passphrase, retries when wrong", async ({ page }) => {
+    await create(page, "file", "~/.ssh/id_encrypted");
+    await page.getByTestId("conn-keyed").dblclick();
+    await expect(page.getByTestId("password-dialog")).toContainText("Key passphrase required");
+    await page.getByTestId("password-input").fill("nope");
+    await page.getByTestId("password-ok").click();
+    await expect(page.getByTestId("password-error")).toContainText("Wrong passphrase");
+    await page.getByTestId("password-input").fill("pass");
+    await page.getByTestId("password-ok").click();
+    await page.getByTestId("hostkey-trust").click();
+    await expect.poll(() => screen(page)).toContain("Connected");
+  });
+});

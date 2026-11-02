@@ -15,12 +15,47 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::watch;
 
+/// Where to find an ssh-agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentEndpoint {
+    /// Platform default: `SSH_AUTH_SOCK` on Unix; on Windows the OpenSSH agent pipe,
+    /// then Pageant.
+    Default,
+    /// Unix socket path, or a Windows named pipe path (`\\.\pipe\...`).
+    Path(String),
+}
+
+/// Result of trying to read a private key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyCheck {
+    Ok,
+    NeedsPassphrase,
+    WrongPassphrase,
+    Invalid(String),
+}
+
+/// Can `pem` be decoded with `passphrase`? Used to ask for a passphrase before connecting.
+pub fn check_key(pem: &str, passphrase: Option<&str>) -> KeyCheck {
+    match russh::keys::decode_secret_key(pem, passphrase) {
+        Ok(_) => KeyCheck::Ok,
+        Err(russh::keys::Error::KeyIsEncrypted) => KeyCheck::NeedsPassphrase,
+        Err(_) if passphrase.is_some() => KeyCheck::WrongPassphrase,
+        Err(e) => KeyCheck::Invalid(e.to_string()),
+    }
+}
+
 /// How to authenticate to one hop.
 #[derive(Clone)]
 pub enum HopAuth {
     /// "none" authentication (servers that allow it).
     None,
     Password(Secret),
+    /// Keys held by a running ssh-agent (Windows OpenSSH agent, Pageant, `SSH_AUTH_SOCK`).
+    /// `fingerprint` (`SHA256:...`) restricts which agent key is offered.
+    Agent {
+        endpoint: AgentEndpoint,
+        fingerprint: Option<String>,
+    },
     /// Private key in OpenSSH/PEM format, with an optional passphrase.
     Key {
         pem: Secret,
@@ -60,6 +95,10 @@ pub fn plan_hops(
         .into_iter()
         .map(|c| {
             let auth = match &c.secret {
+                Some(r) if r.provider == "agent" => HopAuth::Agent {
+                    endpoint: AgentEndpoint::Default,
+                    fingerprint: Some(r.item.trim().to_string()).filter(|f| !f.is_empty()),
+                },
                 Some(r) => {
                     let secret = creds.resolve(r).map_err(|source| PlanError::Credential {
                         hop: c.name.clone(),
@@ -97,6 +136,8 @@ pub enum ErrorKind {
     HostKeyChanged,
     #[error("authentication failed")]
     AuthFailed,
+    #[error("ssh-agent: {0}")]
+    Agent(String),
     #[error("cannot use private key: {0}")]
     BadKey(String),
     #[error("session error: {0}")]
@@ -376,6 +417,17 @@ impl SshSession {
                     .await
                     .map_err(session_err)?
                     .success(),
+                HopAuth::Agent {
+                    endpoint,
+                    fingerprint,
+                } => authenticate_with_agent(
+                    &mut handle,
+                    &hop.username,
+                    endpoint,
+                    fingerprint.as_deref(),
+                )
+                .await
+                .map_err(&err)?,
                 HopAuth::Key { pem, passphrase } => {
                     let key = russh::keys::decode_secret_key(
                         pem.expose(),
@@ -557,5 +609,101 @@ impl SshSession {
             .await?;
         channel.request_shell(true).await?;
         Ok(Shell { channel })
+    }
+}
+
+use russh::keys::agent::client::{AgentClient, AgentStream};
+
+/// Offer the agent's keys (optionally only the one matching `fingerprint`) until one is accepted.
+async fn agent_auth<S>(
+    handle: &mut Handle<ClientHandler>,
+    user: &str,
+    mut agent: AgentClient<S>,
+    fingerprint: Option<&str>,
+) -> Result<bool, ErrorKind>
+where
+    S: AgentStream + Unpin + Send + 'static,
+{
+    let ids = agent
+        .request_identities()
+        .await
+        .map_err(|e| ErrorKind::Agent(e.to_string()))?;
+    if ids.is_empty() {
+        return Err(ErrorKind::Agent(
+            "the agent holds no keys (add one with ssh-add)".into(),
+        ));
+    }
+    let mut offered = 0;
+    for id in ids {
+        let russh::keys::agent::AgentIdentity::PublicKey { key, .. } = id else {
+            continue;
+        };
+        if let Some(f) = fingerprint {
+            if key.fingerprint(russh::keys::HashAlg::Sha256).to_string() != f {
+                continue;
+            }
+        }
+        offered += 1;
+        let hash = handle
+            .best_supported_rsa_hash()
+            .await
+            .map_err(|e| ErrorKind::Session(e.to_string()))?
+            .flatten();
+        if let Ok(r) = handle
+            .authenticate_publickey_with(user, key, hash, &mut agent)
+            .await
+        {
+            if r.success() {
+                return Ok(true);
+            }
+        }
+    }
+    if offered == 0 && fingerprint.is_some() {
+        return Err(ErrorKind::Agent(
+            "no key in the agent matches the configured fingerprint".into(),
+        ));
+    }
+    Ok(false)
+}
+
+#[cfg(unix)]
+async fn authenticate_with_agent(
+    handle: &mut Handle<ClientHandler>,
+    user: &str,
+    endpoint: &AgentEndpoint,
+    fingerprint: Option<&str>,
+) -> Result<bool, ErrorKind> {
+    let agent = match endpoint {
+        AgentEndpoint::Path(p) => AgentClient::connect_uds(p).await,
+        AgentEndpoint::Default => AgentClient::connect_env().await,
+    }
+    .map_err(|e| ErrorKind::Agent(format!("cannot reach ssh-agent: {e}")))?;
+    agent_auth(handle, user, agent, fingerprint).await
+}
+
+#[cfg(windows)]
+async fn authenticate_with_agent(
+    handle: &mut Handle<ClientHandler>,
+    user: &str,
+    endpoint: &AgentEndpoint,
+    fingerprint: Option<&str>,
+) -> Result<bool, ErrorKind> {
+    const OPENSSH_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+    let unreachable =
+        |e: russh::keys::Error| ErrorKind::Agent(format!("cannot reach ssh-agent: {e}"));
+    match endpoint {
+        AgentEndpoint::Path(p) => {
+            let agent = AgentClient::connect_named_pipe(p)
+                .await
+                .map_err(unreachable)?;
+            agent_auth(handle, user, agent, fingerprint).await
+        }
+        AgentEndpoint::Default => match AgentClient::connect_named_pipe(OPENSSH_PIPE).await {
+            Ok(agent) => agent_auth(handle, user, agent, fingerprint).await,
+            Err(_) => {
+                let agent = AgentClient::connect_pageant().await.map_err(unreachable)?;
+                agent_auth(handle, user, agent, fingerprint).await
+            }
+        },
     }
 }
