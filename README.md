@@ -1,3 +1,5 @@
+<p align="center"><img src="branding/simpu-icon.svg" width="128" alt="Simpu logo"></p>
+
 # Simpu
 
 A Windows SSH client with a connection tree, tabbed and split sessions,

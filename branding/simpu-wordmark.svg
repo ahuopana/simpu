@@ -1,8 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 160" role="img" aria-label="simpu">
-  <g transform="translate(0 0) scale(.6)">
-    <path d="M26 152C26 96 84 56 150 56C197 56 231 84 234 120C235 134 226 144 212 146L40 170C31 170 26 162 26 152Z" fill="#2d4560"/>
-    <path d="M40 176L212 152C226 150 234 158 230 170C222 202 178 216 130 216C80 216 46 202 40 176Z" fill="#1b2a3a"/>
-    <circle cx="150" cy="164" r="27" fill="#c9b6e8"/>
+  <g transform="translate(-6 -8) scale(.64)">
+    <path d="M40 142 L214 120 C230 119 238 130 234 148 L40 184 Z" fill="#8f7cc2"/>
+    <path d="M26 130C26 76 84 36 150 36C197 36 231 64 234 98C235 112 226 122 212 124L40 144C31 144 26 138 26 130Z" fill="#2f4a68"/>
+    <circle cx="150" cy="144" r="29" fill="#f3ecfb"/>
+    <path d="M38 178L214 150C228 148 236 156 232 170C224 204 180 218 130 218C80 218 44 204 38 184Z" fill="#243a50"/>
   </g>
   <text x="170" y="112" font-family="Nunito, Quicksand, 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif" font-size="96" font-weight="700" fill="#1b2a3a" letter-spacing="1">simpu</text>
 </svg>
