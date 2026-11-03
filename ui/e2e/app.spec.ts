@@ -7,9 +7,12 @@ const type = async (page: Page, text: string) => {
 };
 const open = async (page: Page, name: string, trust = true) => {
   await page.getByTestId(`conn-${name}`).dblclick();
-  // the (mock) Bitwarden vault starts locked; unlock it the first time it is needed
+  // The (mock) Bitwarden vault starts locked: unlock it the first time it is needed.
+  // Wait for whichever dialog comes first instead of guessing a delay (slow machines).
+  const first = page.locator("[data-testid=password-dialog], [data-testid=hostkey-trust]").first();
+  await first.waitFor({ timeout: 5000 }).catch(() => {});
   const dialog = page.getByTestId("password-dialog");
-  if (await dialog.waitFor({ timeout: 400 }).then(() => true, () => false)) {
+  if (await dialog.isVisible()) {
     if ((await dialog.textContent())?.includes("Unlock")) {
       await page.getByTestId("password-input").fill("master");
       await page.getByTestId("password-ok").click();

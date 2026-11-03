@@ -43,8 +43,8 @@ html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:
 #side-actions { display:flex; gap:6px; padding:8px 8px 0; }
 #side-actions button, #modal button { background:var(--bg); color:var(--fg); border:1px solid #444; border-radius:4px; padding:3px 8px; cursor:pointer; }
 .conn .spacer { flex:1; }
-.conn .act { visibility:hidden; color:var(--muted); }
-.conn:hover .act { visibility:visible; }
+.conn .act { opacity:.35; color:var(--muted); }
+.conn:hover .act { opacity:1; }
 #modal form { display:grid; grid-template-columns:110px 1fr; gap:6px 10px; align-items:center; min-width:460px; }
 #modal form h3 { grid-column:1/-1; margin:0 0 4px; }
 #modal input, #modal select { background:var(--bg); color:var(--fg); border:1px solid #444; border-radius:4px; padding:4px; }
@@ -83,7 +83,7 @@ html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:
 #files .frow:hover { background:#3a3d41; }
 #files .frow .nm { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 #files .frow .sz { color:var(--muted); font-size:11px; }
-#files .frow .act { visibility:hidden; color:var(--muted); cursor:pointer; }
-#files .frow:hover .act { visibility:visible; }
+#files .frow .act { opacity:.35; color:var(--muted); cursor:pointer; }
+#files .frow:hover .act { opacity:1; }
 #files .ferr { color:#f66; padding:6px 8px; }
 #files .fempty { color:var(--muted); padding:12px; }
