@@ -2,7 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import type { Backend, CredentialPrompt, RemoteDir, ForwardInfo, HostKeyPrompt, SessionState, TransferProgress, Unlisten } from "./api";
+import type { Backend, CredentialPrompt, Settings, RemoteDir, ForwardInfo, HostKeyPrompt, SessionState, TransferProgress, Unlisten } from "./api";
 
 function sub<T>(event: string, cb: (p: T) => void): Unlisten {
   let un: (() => void) | undefined;
@@ -15,6 +15,14 @@ function sub<T>(event: string, cb: (p: T) => void): Unlisten {
 }
 
 export const tauriBackend: Backend = {
+  getSettings: () => invoke<Settings>("settings_get"),
+  saveSettings: async (settings) => {
+    try {
+      await invoke("settings_save", { settings });
+    } catch (e) {
+      throw new Error(Array.isArray(e) ? e.join("; ") : String(e));
+    }
+  },
   loadTree: () => invoke("tree_load"),
   saveTree: (nodes) => invoke("tree_save", { nodes }),
   importSshConfig: () => invoke("import_ssh_config"),

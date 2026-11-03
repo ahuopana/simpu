@@ -193,7 +193,7 @@ pub struct Manager<E: Events> {
     tree_path: PathBuf,
     known_path: PathBuf,
     known: Arc<Mutex<KnownHosts>>,
-    creds: Arc<Credentials>,
+    creds: Mutex<Arc<Credentials>>,
     sessions: Mutex<HashMap<String, Active>>,
     prompts: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
     secret_prompts: Mutex<HashMap<String, oneshot::Sender<Option<String>>>>,
@@ -222,7 +222,7 @@ impl<E: Events> Manager<E> {
             )),
             tree_path,
             known_path,
-            creds: Arc::new(creds),
+            creds: Mutex::new(Arc::new(creds)),
             sessions: Mutex::new(HashMap::new()),
             prompts: Arc::new(Mutex::new(HashMap::new())),
             secret_prompts: Mutex::new(HashMap::new()),
@@ -232,6 +232,38 @@ impl<E: Events> Manager<E> {
             connect_opts: Mutex::new(ConnectOptions::default()),
             reconnect_cfg: Mutex::new(ReconnectConfig::default()),
         })
+    }
+
+    /// Replace the credential providers (e.g. after the settings changed). Sessions that are
+    /// already open keep the credentials they resolved.
+    pub fn set_credentials(&self, creds: Credentials) {
+        *lock(&self.creds) = Arc::new(creds);
+    }
+
+    /// Apply network and reconnect settings to sessions opened from now on.
+    pub fn apply_settings(&self, s: &crate::settings::Settings) {
+        self.set_connect_options(s.connect_options());
+        self.set_reconnect_config(s.reconnect_config());
+    }
+
+    /// Path of `settings.toml` (next to the connection tree).
+    pub fn settings_path(&self) -> PathBuf {
+        self.tree_path.with_file_name("settings.toml")
+    }
+
+    pub fn load_settings(&self) -> Result<crate::settings::Settings, String> {
+        crate::settings::load(&self.settings_path())
+    }
+
+    /// Validate, persist and apply. Returns the problems if the settings are not usable.
+    pub fn save_settings(&self, s: &crate::settings::Settings) -> Result<(), Vec<String>> {
+        let problems = s.validate();
+        if !problems.is_empty() {
+            return Err(problems);
+        }
+        crate::settings::save(&self.settings_path(), s).map_err(|e| vec![e])?;
+        self.apply_settings(s);
+        Ok(())
     }
 
     pub fn set_connect_options(&self, o: ConnectOptions) {
@@ -371,7 +403,7 @@ impl<E: Events> Manager<E> {
     ) -> Result<Vec<crate::ssh::Hop>, String> {
         let mut error = None;
         for _ in 0..4 {
-            let (t, c, creds) = (tree.clone(), conn.clone(), self.creds.clone());
+            let (t, c, creds) = (tree.clone(), conn.clone(), lock(&self.creds).clone());
             let planned = tokio::task::spawn_blocking(move || plan_hops(&t, &c, &creds))
                 .await
                 .map_err(|e| e.to_string())?;
@@ -397,7 +429,7 @@ impl<E: Events> Manager<E> {
                 .ask(info)
                 .await
                 .ok_or_else(|| format!("{provider} is locked (unlock cancelled)"))?;
-            let creds = self.creds.clone();
+            let creds = lock(&self.creds).clone();
             let p = provider.clone();
             match tokio::task::spawn_blocking(move || creds.unlock(&p, &pw))
                 .await

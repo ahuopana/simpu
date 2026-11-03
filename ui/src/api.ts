@@ -114,9 +114,19 @@ export interface CaptureStatus {
   bytes: number;
 }
 
+export interface Settings {
+  keepassxc: { database: string; keyfile: string; cli: string };
+  bitwarden: { cli: string };
+  network: { keepalive_secs: number; keepalive_max: number; connect_timeout_secs: number };
+  reconnect: { base_secs: number; max_secs: number; max_attempts: number };
+}
+
 export type Unlisten = () => void;
 
 export interface Backend {
+  getSettings(): Promise<Settings>;
+  /** Rejects with a message listing the problems when the settings are not valid. */
+  saveSettings(settings: Settings): Promise<void>;
   loadTree(): Promise<NodeDto[]>;
   saveTree(nodes: NodeDto[]): Promise<void>;
   /** Import ~/.ssh/config into a new folder; resolves to the number of hosts added. */

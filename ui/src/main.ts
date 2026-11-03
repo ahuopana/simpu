@@ -2,6 +2,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import type { ConnectionDto, ExportRequest, ForwardInfo, NodeDto, RemoteEntry, SessionState } from "./api";
+import { validateSettings } from "./settings";
 import { baseName, breadcrumbs, formatSize, joinPath, parentOf, validName } from "./files";
 import { backend, inTauri } from "./backend";
 import { closeLeaf, type Dir, leaves, newTab, type Pane, splitLeaf, type Tab } from "./layout";
@@ -173,6 +174,69 @@ function openEditor(existing?: ConnectionDto) {
     void persist(upsertConnection(nodes, conn, f("folder").value || null));
   });
   f("name").focus();
+}
+
+// ---------- settings ----------
+async function openSettings() {
+  const cur = await backend.getSettings();
+  const m = $("modal");
+  m.hidden = false;
+  const num = (name: string, label: string, v: number, hint = "") =>
+    `<label>${label}</label><input name="${name}" type="number" min="0" value="${v}" data-testid="set-${name}" /><span class="hint">${hint}</span>`;
+  m.innerHTML = `<div class="box wide" role="dialog"><form data-testid="settings-dialog" novalidate>
+    <h3>Settings</h3>
+    <h4>KeePassXC</h4>
+    <label>Database (.kdbx)</label><span class="inline"><input name="kp_db" value="${esc(cur.keepassxc.database)}" data-testid="set-kp-db" placeholder="empty = KeePassXC off" />
+      <button type="button" data-testid="set-kp-browse">Browse…</button></span><span></span>
+    <label>Key file</label><input name="kp_key" value="${esc(cur.keepassxc.keyfile)}" data-testid="set-kp-key" placeholder="optional" /><span></span>
+    <label>keepassxc-cli</label><input name="kp_cli" value="${esc(cur.keepassxc.cli)}" data-testid="set-kp-cli" placeholder="empty = from PATH" /><span></span>
+    <h4>Bitwarden</h4>
+    <label>bw executable</label><input name="bw_cli" value="${esc(cur.bitwarden.cli)}" data-testid="set-bw-cli" placeholder="empty = from PATH" /><span></span>
+    <h4>Connection</h4>
+    ${num("keepalive_secs", "Keepalive every (s)", cur.network.keepalive_secs, "0 = off")}
+    ${num("keepalive_max", "Missed keepalives", cur.network.keepalive_max, "before the link counts as dead")}
+    ${num("connect_timeout_secs", "Connect timeout (s)", cur.network.connect_timeout_secs)}
+    <h4>Automatic reconnect</h4>
+    ${num("base_secs", "First retry after (s)", cur.reconnect.base_secs, "doubles each attempt")}
+    ${num("max_secs", "Longest delay (s)", cur.reconnect.max_secs)}
+    ${num("max_attempts", "Give up after", cur.reconnect.max_attempts, "attempts, 0 = never")}
+    <div class="err" data-testid="settings-errors" style="grid-column:1/-1"></div>
+    <div class="hint" style="grid-column:1/-1">Applies to sessions opened afterwards. Changing a password-manager setting restarts its plugin.</div>
+    <div class="buttons"><button type="button" data-testid="settings-cancel">Cancel</button>
+      <button type="submit" data-testid="settings-save">Save</button></div></form></div>`;
+  const form = m.querySelector("form")!;
+  const f = (n: string) => form.elements.namedItem(n) as HTMLInputElement;
+  const close = () => {
+    m.hidden = true;
+    m.replaceChildren();
+  };
+  m.querySelector('[data-testid="settings-cancel"]')!.addEventListener("click", close);
+  m.querySelector('[data-testid="set-kp-browse"]')!.addEventListener("click", () => {
+    void backend.pickFiles().then((p) => {
+      if (p[0]) f("kp_db").value = p[0];
+    });
+  });
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const n = (name: string) => Number(f(name).value);
+    const next = {
+      keepassxc: { database: f("kp_db").value.trim(), keyfile: f("kp_key").value.trim(), cli: f("kp_cli").value.trim() },
+      bitwarden: { cli: f("bw_cli").value.trim() },
+      network: { keepalive_secs: n("keepalive_secs"), keepalive_max: n("keepalive_max"), connect_timeout_secs: n("connect_timeout_secs") },
+      reconnect: { base_secs: n("base_secs"), max_secs: n("max_secs"), max_attempts: n("max_attempts") },
+    };
+    const errs = m.querySelector<HTMLElement>('[data-testid="settings-errors"]')!;
+    const problems = validateSettings(next);
+    errs.textContent = problems.join("\n");
+    if (problems.length) return;
+    backend.saveSettings(next).then(
+      () => {
+        close();
+        toast("Settings saved");
+      },
+      (e: unknown) => (errs.textContent = String(e instanceof Error ? e.message : e)),
+    );
+  });
 }
 
 // ---------- remote file browser (SFTP) ----------
@@ -898,6 +962,7 @@ $("split-col").addEventListener("click", () => split("col"));
 $("close-pane").addEventListener("click", closePane);
 $("rec").addEventListener("click", () => void toggleRecording());
 $("files-btn").addEventListener("click", toggleFiles);
+$("settings-btn").addEventListener("click", () => void openSettings());
 {
   const box = $("files");
   box.addEventListener("dragover", (e) => {

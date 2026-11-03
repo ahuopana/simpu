@@ -533,3 +533,72 @@ async fn remote_file_browser_operations() {
     assert!(s.remote.path().join("logs/app.log").exists());
     assert!(s.mgr.sftp_dir("nope", ".").await.is_err());
 }
+
+#[tokio::test]
+async fn settings_are_validated_persisted_and_survive_a_restart() {
+    use simpu_core::settings::Settings;
+    let s = setup().await;
+    assert_eq!(
+        s.mgr.load_settings().unwrap(),
+        Settings::default(),
+        "no file yet = defaults"
+    );
+
+    let mut bad = Settings::default();
+    bad.network.keepalive_secs = 1;
+    bad.reconnect.base_secs = 0;
+    let problems = s.mgr.save_settings(&bad).unwrap_err();
+    assert_eq!(problems.len(), 2);
+    assert!(
+        !s.dir.path().join("settings.toml").exists(),
+        "nothing written for invalid settings"
+    );
+
+    let mut good = Settings::default();
+    good.keepassxc.database = "/vault/db.kdbx".into();
+    good.network.keepalive_secs = 10;
+    s.mgr.save_settings(&good).unwrap();
+    let again = Manager::new(
+        Arc::new(Fake::default()),
+        s.dir.path().to_path_buf(),
+        Credentials::default(),
+    )
+    .unwrap();
+    assert_eq!(again.load_settings().unwrap(), good);
+}
+
+#[tokio::test]
+async fn replacing_the_credential_providers_affects_new_sessions_only() {
+    let s = setup().await;
+    let answer = answer_next_prompt(&s, true);
+    s.mgr
+        .open("s1", &s.conn.id.to_string(), 80, 24)
+        .await
+        .unwrap();
+    answer.await.unwrap();
+
+    // a provider that hands out the wrong password: new sessions fail to authenticate
+    let mut wrong = Credentials::default();
+    wrong.register(Box::new(StaticProvider::new(&[("pw", "not-the-password")])));
+    s.mgr.set_credentials(wrong);
+    let err = s
+        .mgr
+        .open("s2", &s.conn.id.to_string(), 80, 24)
+        .await
+        .unwrap_err();
+    assert!(err.contains("authentication failed"), "{err}");
+    // the already open session keeps working
+    s.mgr.write("s1", b"still\n".to_vec());
+    until("echo", || {
+        s.events.data.lock().unwrap().contains("echo:still")
+    })
+    .await;
+
+    let mut right = Credentials::default();
+    right.register(Box::new(StaticProvider::new(&[("pw", "pw")])));
+    s.mgr.set_credentials(right);
+    s.mgr
+        .open("s3", &s.conn.id.to_string(), 80, 24)
+        .await
+        .unwrap();
+}

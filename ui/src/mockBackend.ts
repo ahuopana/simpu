@@ -1,5 +1,6 @@
 // In-memory backend used by `vite dev` in a plain browser and by the e2e tests.
-import type { Backend, RemoteDir, ForwardInfo, ForwardSpec, SessionState, CaptureStatus, ExportRequest, ExportResponse, ConnectionDto, CredentialPrompt, HostKeyPrompt, NodeDto, RemoteEntry, TransferProgress } from "./api";
+import { defaultSettings, validateSettings } from "./settings";
+import type { Backend, Settings, RemoteDir, ForwardInfo, ForwardSpec, SessionState, CaptureStatus, ExportRequest, ExportResponse, ConnectionDto, CredentialPrompt, HostKeyPrompt, NodeDto, RemoteEntry, TransferProgress } from "./api";
 
 const sample: NodeDto[] = [
   {
@@ -55,6 +56,16 @@ export class MockBackend implements Backend {
   /** Connections to which the user has already trusted the host key. */
   trusted = new Set<string>();
   uploads: { sessionId: string; localPath: string; remoteDir: string }[] = [];
+
+  settings: Settings = defaultSettings();
+  async getSettings() {
+    return structuredClone(this.settings);
+  }
+  async saveSettings(s: Settings) {
+    const problems = validateSettings(s);
+    if (problems.length) throw new Error(problems.join("; "));
+    this.settings = structuredClone(s);
+  }
 
   async loadTree() {
     return structuredClone(this.tree);

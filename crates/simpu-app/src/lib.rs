@@ -10,6 +10,7 @@ use simpu_core::manager::{
     TransferInfo,
 };
 use simpu_core::model::{Forward, Node, Tree};
+use simpu_core::settings::Settings;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager as _, State};
 
@@ -258,11 +259,17 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
+            let settings =
+                simpu_core::settings::load(&dir.join("settings.toml")).unwrap_or_else(|e| {
+                    eprintln!("ignoring unreadable settings: {e}");
+                    Settings::default()
+                });
             let manager = Manager::new(
                 Arc::new(TauriEvents(app.handle().clone())),
                 dir,
-                load_credentials(),
+                load_credentials(&settings),
             )?;
+            manager.apply_settings(&settings);
             app.manage::<App>(Arc::new(manager));
             Ok(())
         })
@@ -286,6 +293,8 @@ pub fn run() {
             forward_stop,
             forward_list,
             import_ssh_config,
+            settings_get,
+            settings_save,
             sftp_list,
             sftp_dir,
             sftp_mkdir,
@@ -320,20 +329,41 @@ fn spawn_plugin(creds: &mut Credentials, file: &str, env: &[(&str, &str)]) {
 
 /// Register credential providers: local key files always; Bitwarden and
 /// KeePassXC when their plugin executable is installed next to the app.
-/// Bitwarden unlocks in-app (or inherits `BW_SESSION`); KeePassXC needs
-/// `KEEPASSXC_DB` (and optionally `KEEPASSXC_KEYFILE`, `KEEPASSXC_CLI`).
-fn load_credentials() -> Credentials {
+/// Bitwarden unlocks in-app (or inherits `BW_SESSION`). KeePassXC needs a database
+/// (Settings, or `KEEPASSXC_DB` as a fallback for scripted setups).
+fn load_credentials(settings: &Settings) -> Credentials {
     let mut creds = Credentials::default();
     creds.register(Box::new(simpu_core::credentials::FileProvider::from_env()));
     let bw_session = std::env::var("BW_SESSION").unwrap_or_default();
+    let bw_cli = &settings.bitwarden.cli;
     spawn_plugin(
         &mut creds,
         "simpu-plugin-bitwarden",
-        &[("BW_SESSION", bw_session.as_str())],
+        &[
+            ("BW_SESSION", bw_session.as_str()),
+            ("BW_BIN", bw_cli.as_str()),
+        ],
     );
-    if let Ok(db) = std::env::var("KEEPASSXC_DB") {
-        let key = std::env::var("KEEPASSXC_KEYFILE").unwrap_or_default();
-        let cli = std::env::var("KEEPASSXC_CLI").unwrap_or_else(|_| "keepassxc-cli".into());
+    let kp = &settings.keepassxc;
+    let env = |k: &str| std::env::var(k).unwrap_or_default();
+    let pick = |setting: &str, var: &str| {
+        if setting.is_empty() {
+            env(var)
+        } else {
+            setting.to_string()
+        }
+    };
+    let (db, key, cli) = (
+        pick(&kp.database, "KEEPASSXC_DB"),
+        pick(&kp.keyfile, "KEEPASSXC_KEYFILE"),
+        pick(&kp.cli, "KEEPASSXC_CLI"),
+    );
+    if !db.is_empty() {
+        let cli = if cli.is_empty() {
+            "keepassxc-cli".to_string()
+        } else {
+            cli
+        };
         spawn_plugin(
             &mut creds,
             "simpu-plugin-keepassxc",
@@ -345,4 +375,20 @@ fn load_credentials() -> Credentials {
         );
     }
     creds
+}
+
+#[tauri::command]
+fn settings_get(app: State<'_, App>) -> Result<Settings, String> {
+    app.load_settings()
+}
+
+/// Validate, save and apply; plugins are restarted so database/CLI changes take effect.
+#[tauri::command]
+async fn settings_save(app: State<'_, App>, settings: Settings) -> Result<(), Vec<String>> {
+    app.save_settings(&settings)?;
+    let creds = tauri::async_runtime::spawn_blocking(move || load_credentials(&settings))
+        .await
+        .map_err(|e| vec![e.to_string()])?;
+    app.set_credentials(creds);
+    Ok(())
 }

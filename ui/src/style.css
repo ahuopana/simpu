@@ -40,7 +40,7 @@ html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:
 #modal button { margin-right:8px; padding:4px 12px; }
 .empty { color:var(--muted); padding:24px; }
 
-#side-actions { display:flex; gap:6px; padding:8px 8px 0; }
+#side-actions { display:flex; flex-wrap:wrap; gap:6px; padding:8px 8px 0; }
 #side-actions button, #modal button { background:var(--bg); color:var(--fg); border:1px solid #444; border-radius:4px; padding:3px 8px; cursor:pointer; }
 .conn .spacer { flex:1; }
 .conn .act { opacity:.35; color:var(--muted); }
@@ -87,3 +87,8 @@ html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:
 #files .frow:hover .act { opacity:1; }
 #files .ferr { color:#f66; padding:6px 8px; }
 #files .fempty { color:var(--muted); padding:12px; }
+
+#modal h4 { grid-column:1/-1; margin:8px 0 0; color:var(--muted); font-weight:600; border-bottom:1px solid #444; }
+#modal .hint { color:var(--muted); font-size:11px; }
+#modal .inline { display:flex; gap:6px; } #modal .inline input { flex:1; }
+#modal input[type=number] { width:110px; }

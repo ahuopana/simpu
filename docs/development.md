@@ -66,10 +66,20 @@ Explorer is not supported yet.
   (`SHA256:...`, from `ssh-add -l`) to pick one key. On Windows start the "OpenSSH Authentication Agent"
   service (or Pageant) and add keys with `ssh-add`.
 
+## Settings
+
+"⚙ Settings" edits `settings.toml` in the config directory (Windows: `%APPDATA%\dev.simpu.app\`):
+KeePassXC database / key file / `keepassxc-cli` path, the `bw` path, keepalive interval and misses,
+connect timeout, and the automatic-reconnect delays (first delay, longest delay, attempt limit). Values are
+validated in the dialog and again in the core; invalid settings are never written. Network and reconnect
+changes apply to sessions opened afterwards; changing a password-manager setting restarts its plugin (open
+sessions keep the credentials they already resolved). The `KEEPASSXC_DB`, `KEEPASSXC_KEYFILE` and
+`KEEPASSXC_CLI` environment variables still work as a fallback when the setting is empty.
+
 ## Using the KeePassXC plugin
 
-Install KeePassXC (it ships `keepassxc-cli`). Before starting Simpu set
-`KEEPASSXC_DB` to the `.kdbx` path (optionally `KEEPASSXC_KEYFILE`,
+Install KeePassXC (it ships `keepassxc-cli`). Set the database path (and optionally the
+key file and CLI path) under ⚙ Settings (or, for scripted setups, `KEEPASSXC_DB`, `KEEPASSXC_KEYFILE`,
 `KEEPASSXC_CLI`). In a connection choose provider `keepassxc`; item =
 `Group/Entry` for a password, `Group/Entry#attachment-name` for a private key
 stored as an attachment (kind `keyfile`; without `#` the key is read from Notes).

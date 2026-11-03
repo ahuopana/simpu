@@ -526,3 +526,52 @@ test.describe("remote file browser", () => {
     await expect(page.getByTestId("files-error")).toContainText("Open a session");
   });
 });
+
+test.describe("settings", () => {
+  test("shows defaults, validates, saves and reopens with the saved values", async ({ page }) => {
+    await page.getByTestId("settings-btn").click();
+    await expect(page.getByTestId("set-keepalive_secs")).toHaveValue("30");
+    await expect(page.getByTestId("set-kp-db")).toHaveValue("");
+
+    await page.getByTestId("set-keepalive_secs").fill("2");
+    await page.getByTestId("set-max_secs").fill("0");
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-errors")).toContainText("keepalive interval");
+    await expect(page.getByTestId("settings-errors")).toContainText("longest retry delay");
+    expect((await page.evaluate(() => (window as any).__simpu.backend.settings)).network.keepalive_secs).toBe(30);
+
+    await page.getByTestId("set-keepalive_secs").fill("10");
+    await page.getByTestId("set-max_secs").fill("120");
+    await page.getByTestId("set-max_attempts").fill("5");
+    await page.getByTestId("set-kp-browse").click(); // mock dialog returns /tmp/report.pdf
+    await expect(page.getByTestId("set-kp-db")).toHaveValue("/tmp/report.pdf");
+    await page.getByTestId("set-kp-db").fill("C:\\Vaults\\work.kdbx");
+    await page.getByTestId("set-bw-cli").fill("C:\\tools\\bw.exe");
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("toasts")).toContainText("Settings saved");
+    await expect(page.getByTestId("settings-dialog")).toHaveCount(0);
+
+    const saved = await page.evaluate(() => (window as any).__simpu.backend.settings);
+    expect(saved).toMatchObject({
+      keepassxc: { database: "C:\\Vaults\\work.kdbx" },
+      bitwarden: { cli: "C:\\tools\\bw.exe" },
+      network: { keepalive_secs: 10 },
+      reconnect: { max_secs: 120, max_attempts: 5 },
+    });
+    await page.getByTestId("settings-btn").click();
+    await expect(page.getByTestId("set-kp-db")).toHaveValue("C:\\Vaults\\work.kdbx");
+    await page.getByTestId("settings-cancel").click();
+    await expect(page.getByTestId("settings-dialog")).toHaveCount(0);
+  });
+
+  test("a server-side rejection is shown in the dialog", async ({ page }) => {
+    await page.getByTestId("settings-btn").click();
+    await page.evaluate(() => {
+      (window as any).__simpu.backend.saveSettings = async () => {
+        throw new Error("could not write settings.toml");
+      };
+    });
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-errors")).toContainText("could not write");
+  });
+});

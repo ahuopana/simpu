@@ -14,6 +14,7 @@ pub mod model;
 pub mod platform;
 pub mod plugin;
 pub mod redact;
+pub mod settings;
 pub mod sftp;
 pub mod socks5;
 pub mod ssh;

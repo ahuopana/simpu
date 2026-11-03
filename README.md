@@ -19,7 +19,7 @@ plugin work in tests; there is no release yet.
 - Jump host chains, with credentials from a password manager
 - Port forwarding (local, remote, SOCKS5), tunnel-only connections
 - Keepalive and per-connection reconnect policy (automatic, ask, or close)
-- Plugins: Bitwarden and KeePassXC supply passwords and key files
+- Plugins: Bitwarden and KeePassXC supply passwords and key files; a settings screen configures them
 - Log capture: record a session, export the last N commands or everything,
   with optional anonymization of usernames, hosts and secrets
 
