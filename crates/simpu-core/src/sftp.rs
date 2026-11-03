@@ -76,6 +76,15 @@ impl Sftp {
         Ok(self.inner.canonicalize(".").await?)
     }
 
+    /// Absolute form of `path` as the server sees it (`.` is the home directory).
+    pub async fn canonical(&self, path: &str) -> Result<String, SftpError> {
+        Ok(self.inner.canonicalize(path).await?)
+    }
+
+    pub async fn remove_dir(&self, path: &str) -> Result<(), SftpError> {
+        Ok(self.inner.remove_dir(path).await?)
+    }
+
     pub async fn mkdir(&self, path: &str) -> Result<(), SftpError> {
         Ok(self.inner.create_dir(path).await?)
     }

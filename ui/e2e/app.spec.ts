@@ -433,3 +433,93 @@ test.describe("keys and agent", () => {
     await expect.poll(() => screen(page)).toContain("Connected");
   });
 });
+
+test.describe("remote file browser", () => {
+  const backendOf = (page: Page) => page.evaluate(() => (window as any).__simpu.backend);
+
+  async function openFiles(page: Page) {
+    await open(page, "db");
+    await expect.poll(() => screen(page)).toContain("Connected");
+    await page.getByTestId("files-btn").click();
+    await expect(page.getByTestId("files-path")).toContainText("home");
+  }
+
+  test("starts in the home directory with folders first; navigate down, up and via breadcrumbs", async ({ page }) => {
+    await openFiles(page);
+    await expect(page.getByTestId("files-path")).toHaveText(/user/);
+    const rows = page.locator("[data-testid^=file-row-]");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.first()).toHaveAttribute("data-testid", "file-row-logs");
+
+    await page.getByTestId("file-row-logs").dblclick();
+    await expect(page.getByTestId("file-row-app.log")).toBeVisible();
+    await expect(page.getByTestId("files-path")).toContainText("logs");
+    await page.getByTestId("file-up").click();
+    await expect(page.getByTestId("file-row-notes.txt")).toBeVisible();
+    await page.getByTestId("files-path").getByRole("button", { name: "home" }).click();
+    await expect(page.getByTestId("file-row-user")).toBeVisible();
+  });
+
+  test("create, rename and delete; invalid names and non-empty folders are refused", async ({ page }) => {
+    await openFiles(page);
+    page.once("dialog", (d) => void d.accept("backup"));
+    await page.getByTestId("file-mkdir").click();
+    await expect(page.getByTestId("file-row-backup")).toBeVisible();
+
+    page.once("dialog", (d) => void d.accept("a/b"));
+    await page.getByTestId("file-mkdir").click();
+    await expect(page.getByTestId("toasts")).toContainText("slashes");
+
+    page.once("dialog", (d) => void d.accept("readme.txt"));
+    await page.getByTestId("file-row-notes.txt").hover();
+    await page.getByTestId("file-rename-notes.txt").click();
+    await expect(page.getByTestId("file-row-readme.txt")).toBeVisible();
+    await expect(page.getByTestId("file-row-notes.txt")).toHaveCount(0);
+
+    page.once("dialog", (d) => void d.accept());
+    await page.getByTestId("file-row-readme.txt").hover();
+    await page.getByTestId("file-delete-readme.txt").click();
+    await expect(page.getByTestId("file-row-readme.txt")).toHaveCount(0);
+
+    page.once("dialog", (d) => void d.accept());
+    await page.getByTestId("file-row-logs").hover();
+    await page.getByTestId("file-delete-logs").click();
+    await expect(page.getByTestId("toasts")).toContainText("not empty");
+    await expect(page.getByTestId("file-row-logs")).toBeVisible();
+  });
+
+  test("upload by dialog and by drop, download to a chosen folder", async ({ page }) => {
+    await openFiles(page);
+    await page.getByTestId("file-upload").click();
+    await expect(page.getByTestId("file-row-report.pdf")).toBeVisible();
+    expect((await backendOf(page)).uploads.at(-1)).toMatchObject({ localPath: "/tmp/report.pdf", remoteDir: "/home/user" });
+
+    const dt = await page.evaluateHandle(() => {
+      const d = new DataTransfer();
+      d.items.add(new File(["x"], "dropped.txt"));
+      return d;
+    });
+    await page.getByTestId("files").dispatchEvent("drop", { dataTransfer: dt });
+    await expect(page.getByTestId("file-row-dropped.txt")).toBeVisible();
+
+    await page.getByTestId("file-row-notes.txt").hover();
+    await page.getByTestId("file-download-notes.txt").click();
+    await expect.poll(async () => (await backendOf(page)).downloads.length).toBe(1);
+    expect((await backendOf(page)).downloads[0]).toMatchObject({ remotePath: "/home/user/notes.txt", localDir: "/tmp/downloads" });
+  });
+
+  test("a cancelled folder dialog downloads nothing; closing the panel hides it", async ({ page }) => {
+    await openFiles(page);
+    await page.evaluate(() => ((window as any).__simpu.backend.nextFolder = null));
+    await page.getByTestId("file-row-notes.txt").dblclick();
+    await page.waitForTimeout(300);
+    expect((await backendOf(page)).downloads).toEqual([]);
+    await page.getByTestId("files-btn").click();
+    await expect(page.getByTestId("files")).toBeHidden();
+  });
+
+  test("without a session the panel explains what to do", async ({ page }) => {
+    await page.getByTestId("files-btn").click();
+    await expect(page.getByTestId("files-error")).toContainText("Open a session");
+  });
+});

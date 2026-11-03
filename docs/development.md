@@ -49,6 +49,15 @@ connection, set the secret to provider `bitwarden`, item = the Bitwarden item
 id, kind = `password` (login password) or `keyfile` (private key stored in the
 item's notes). Jump hosts use the same mechanism per hop.
 
+## Remote file browser
+
+"📁 Files" opens a panel next to the terminals that follows the focused pane's SSH session (SFTP):
+breadcrumbs, up/refresh, folders first. Double-click a folder to enter it, a file to download it (a
+folder dialog asks where to). Hover a row for download / rename / delete (folders must be empty);
+"＋ Folder" creates one; "⬆ Upload…" or dropping files on the panel uploads into the current folder.
+Dropping files on a terminal still uploads to the home directory. Dragging files *out* of the panel to
+Explorer is not supported yet.
+
 ## Keys, passphrases and ssh-agent
 
 - Local key file: provider `file`, item = path (`~/.ssh/id_ed25519`), kind key file. If the key is

@@ -1,8 +1,8 @@
 // Real backend: forwards to the Rust commands in crates/simpu-app.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { save } from "@tauri-apps/plugin-dialog";
-import type { Backend, CredentialPrompt, ForwardInfo, HostKeyPrompt, SessionState, TransferProgress, Unlisten } from "./api";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import type { Backend, CredentialPrompt, RemoteDir, ForwardInfo, HostKeyPrompt, SessionState, TransferProgress, Unlisten } from "./api";
 
 function sub<T>(event: string, cb: (p: T) => void): Unlisten {
   let un: (() => void) | undefined;
@@ -42,6 +42,18 @@ export const tauriBackend: Backend = {
   captureRegexError: (pattern) => invoke("capture_regex_error", { pattern }),
   pickSavePath: (defaultName) => save({ defaultPath: defaultName }),
   copyText: (text) => navigator.clipboard.writeText(text),
+  sftpDir: (sessionId, path) => invoke<RemoteDir>("sftp_dir", { sessionId, path }),
+  sftpMkdir: (sessionId, path) => invoke("sftp_mkdir", { sessionId, path }),
+  sftpRename: (sessionId, from, to) => invoke("sftp_rename", { sessionId, from, to }),
+  sftpRemove: (sessionId, path, isDir) => invoke("sftp_remove", { sessionId, path, isDir }),
+  pickFolder: async () => {
+    const r = await open({ directory: true, multiple: false });
+    return typeof r === "string" ? r : null;
+  },
+  pickFiles: async () => {
+    const r = await open({ multiple: true });
+    return Array.isArray(r) ? r : typeof r === "string" ? [r] : [];
+  },
   sftpList: (sessionId, path) => invoke("sftp_list", { sessionId, path }),
   upload: (sessionId, localPath, remoteDir) => invoke("sftp_upload", { sessionId, localPath, remoteDir }),
   download: (sessionId, remotePath, localDir) => invoke("sftp_download", { sessionId, remotePath, localDir }),

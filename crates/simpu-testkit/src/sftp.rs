@@ -209,17 +209,28 @@ impl russh_sftp::server::Handler for FsSftp {
         Ok(ok(id))
     }
 
+    async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
+        std::fs::remove_dir(self.real(&path)).map_err(io_err)?;
+        Ok(ok(id))
+    }
+
     async fn rename(&mut self, id: u32, from: String, to: String) -> Result<Status, Self::Error> {
         std::fs::rename(self.real(&from), self.real(&to)).map_err(io_err)?;
         Ok(ok(id))
     }
 
     async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
-        let p = if path == "." || path.is_empty() {
-            "/".to_string()
-        } else {
-            path
-        };
+        let mut parts: Vec<&str> = Vec::new();
+        for seg in path.split('/') {
+            match seg {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                other => parts.push(other),
+            }
+        }
+        let p = format!("/{}", parts.join("/"));
         Ok(Name {
             id,
             files: vec![File::dummy(p)],

@@ -136,6 +136,13 @@ pub struct RemoteEntry {
     pub size: u64,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDir {
+    pub path: String,
+    pub entries: Vec<RemoteEntry>,
+}
+
 enum Cmd {
     Write(Vec<u8>),
     Resize(u32, u32),
@@ -639,6 +646,52 @@ impl<E: Events> Manager<E> {
         let s = Arc::new(ssh.open_sftp().await.map_err(|e| e.to_string())?);
         *guard = Some(s.clone());
         Ok(s)
+    }
+
+    /// List a remote directory; the returned `path` is the canonical absolute path
+    /// (use `.` for the home directory, `..` etc. are resolved by the server).
+    pub async fn sftp_dir(&self, session: &str, path: &str) -> Result<RemoteDir, String> {
+        let sftp = self.sftp(session).await?;
+        let abs = sftp.canonical(path).await.map_err(|e| e.to_string())?;
+        let entries = sftp
+            .list(&abs)
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|e| RemoteEntry {
+                name: e.name,
+                is_dir: e.is_dir,
+                size: e.size,
+            })
+            .collect();
+        Ok(RemoteDir { path: abs, entries })
+    }
+
+    pub async fn sftp_mkdir(&self, session: &str, path: &str) -> Result<(), String> {
+        self.sftp(session)
+            .await?
+            .mkdir(path)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    pub async fn sftp_rename(&self, session: &str, from: &str, to: &str) -> Result<(), String> {
+        self.sftp(session)
+            .await?
+            .rename(from, to)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Delete a file, or an (empty) directory when `is_dir`.
+    pub async fn sftp_remove(&self, session: &str, path: &str, is_dir: bool) -> Result<(), String> {
+        let sftp = self.sftp(session).await?;
+        let r = if is_dir {
+            sftp.remove_dir(path).await
+        } else {
+            sftp.remove_file(path).await
+        };
+        r.map_err(|e| e.to_string())
     }
 
     pub async fn sftp_list(&self, session: &str, path: &str) -> Result<Vec<RemoteEntry>, String> {

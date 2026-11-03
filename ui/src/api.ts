@@ -54,6 +54,12 @@ export interface RemoteEntry {
   size: number;
 }
 
+export interface RemoteDir {
+  /** Canonical absolute path. */
+  path: string;
+  entries: RemoteEntry[];
+}
+
 export interface HostKeyPrompt {
   promptId: string;
   host: string;
@@ -149,6 +155,15 @@ export interface Backend {
   pickSavePath(defaultName: string): Promise<string | null>;
   copyText(text: string): Promise<void>;
 
+  /** List a directory (`.` = home); the result carries the canonical absolute path. */
+  sftpDir(sessionId: string, path: string): Promise<RemoteDir>;
+  sftpMkdir(sessionId: string, path: string): Promise<void>;
+  sftpRename(sessionId: string, from: string, to: string): Promise<void>;
+  sftpRemove(sessionId: string, path: string, isDir: boolean): Promise<void>;
+  /** Ask the user for a local folder (download target); null if cancelled. */
+  pickFolder(): Promise<string | null>;
+  /** Ask the user for local files to upload; empty if cancelled. */
+  pickFiles(): Promise<string[]>;
   sftpList(sessionId: string, path: string): Promise<RemoteEntry[]>;
   upload(sessionId: string, localPath: string, remoteDir: string): Promise<string>;
   download(sessionId: string, remotePath: string, localDir: string): Promise<string>;

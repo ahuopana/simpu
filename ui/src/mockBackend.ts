@@ -1,5 +1,5 @@
 // In-memory backend used by `vite dev` in a plain browser and by the e2e tests.
-import type { Backend, ForwardInfo, ForwardSpec, SessionState, CaptureStatus, ExportRequest, ExportResponse, ConnectionDto, CredentialPrompt, HostKeyPrompt, NodeDto, RemoteEntry, TransferProgress } from "./api";
+import type { Backend, RemoteDir, ForwardInfo, ForwardSpec, SessionState, CaptureStatus, ExportRequest, ExportResponse, ConnectionDto, CredentialPrompt, HostKeyPrompt, NodeDto, RemoteEntry, TransferProgress } from "./api";
 
 const sample: NodeDto[] = [
   {
@@ -326,23 +326,100 @@ export class MockBackend implements Backend {
     this.pendingCred.get(promptId)?.(secret);
     this.pendingCred.delete(promptId);
   }
-  async sftpList(): Promise<RemoteEntry[]> {
-    return [
-      { name: "logs", isDir: true, size: 0 },
-      { name: "notes.txt", isDir: false, size: 12 },
-    ];
+  // ----- remote files: tiny in-memory filesystem (the real one is tested in Rust) -----
+  remoteFs = new Map<string, RemoteEntry[]>([
+    ["/", [{ name: "home", isDir: true, size: 0 }]],
+    ["/home", [{ name: "user", isDir: true, size: 0 }]],
+    [
+      "/home/user",
+      [
+        { name: "logs", isDir: true, size: 0 },
+        { name: "notes.txt", isDir: false, size: 12 },
+      ],
+    ],
+    ["/home/user/logs", [{ name: "app.log", isDir: false, size: 2048 }]],
+  ]);
+  downloads: { sessionId: string; remotePath: string; localDir: string }[] = [];
+  nextFolder: string | null = "/tmp/downloads";
+  nextFiles: string[] = ["/tmp/report.pdf"];
+
+  private norm(path: string): string {
+    const parts: string[] = [];
+    for (const seg of (path === "." ? "/home/user" : path).split("/")) {
+      if (seg === "..") parts.pop();
+      else if (seg && seg !== ".") parts.push(seg);
+    }
+    return "/" + parts.join("/");
+  }
+  private dirEntries(path: string): RemoteEntry[] {
+    const e = this.remoteFs.get(path);
+    if (!e) throw new Error(`no such directory: ${path}`);
+    return e;
+  }
+  async sftpDir(_sessionId: string, path: string): Promise<RemoteDir> {
+    const abs = this.norm(path);
+    const entries = [...this.dirEntries(abs)].sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name));
+    return { path: abs, entries };
+  }
+  async sftpMkdir(_s: string, path: string) {
+    const abs = this.norm(path);
+    const parent = abs.slice(0, abs.lastIndexOf("/")) || "/";
+    const name = abs.slice(abs.lastIndexOf("/") + 1);
+    const list = this.dirEntries(parent);
+    if (list.some((e) => e.name === name)) throw new Error("file exists");
+    list.push({ name, isDir: true, size: 0 });
+    this.remoteFs.set(abs, []);
+  }
+  async sftpRename(_s: string, from: string, to: string) {
+    const [f, t] = [this.norm(from), this.norm(to)];
+    const fp = f.slice(0, f.lastIndexOf("/")) || "/";
+    const tp = t.slice(0, t.lastIndexOf("/")) || "/";
+    const entry = this.dirEntries(fp).find((e) => e.name === f.slice(f.lastIndexOf("/") + 1));
+    if (!entry) throw new Error("no such file");
+    this.remoteFs.set(fp, this.dirEntries(fp).filter((e) => e !== entry));
+    entry.name = t.slice(t.lastIndexOf("/") + 1);
+    this.dirEntries(tp).push(entry);
+    if (entry.isDir) {
+      const kids = this.remoteFs.get(f);
+      this.remoteFs.delete(f);
+      this.remoteFs.set(t, kids ?? []);
+    }
+  }
+  async sftpRemove(_s: string, path: string, isDir: boolean) {
+    const abs = this.norm(path);
+    const parent = abs.slice(0, abs.lastIndexOf("/")) || "/";
+    const name = abs.slice(abs.lastIndexOf("/") + 1);
+    if (isDir && (this.remoteFs.get(abs)?.length ?? 0) > 0) throw new Error("directory not empty");
+    this.remoteFs.set(parent, this.dirEntries(parent).filter((e) => e.name !== name));
+    this.remoteFs.delete(abs);
+  }
+  async pickFolder() {
+    return this.nextFolder;
+  }
+  async pickFiles() {
+    return this.nextFiles;
+  }
+  async sftpList(sessionId: string, path: string): Promise<RemoteEntry[]> {
+    return (await this.sftpDir(sessionId, path)).entries;
   }
   async upload(sessionId: string, localPath: string, remoteDir: string) {
     this.uploads.push({ sessionId, localPath, remoteDir });
     const transferId = `t${++this.n}`;
+    const dir = this.norm(remoteDir);
+    const name = localPath.split(/[\\/]/).pop() ?? localPath;
     queueMicrotask(() => {
       this.progress.emit({ transferId, done: 5, total: 10, finished: false });
+      const list = this.remoteFs.get(dir);
+      if (list && !list.some((e) => e.name === name)) list.push({ name, isDir: false, size: 10 });
       this.progress.emit({ transferId, done: 10, total: 10, finished: true });
     });
     return transferId;
   }
-  async download() {
-    return `t${++this.n}`;
+  async download(sessionId: string, remotePath: string, localDir: string) {
+    this.downloads.push({ sessionId, remotePath, localDir });
+    const transferId = `t${++this.n}`;
+    queueMicrotask(() => this.progress.emit({ transferId, done: 10, total: 10, finished: true }));
+    return transferId;
   }
   onProgress(cb: (p: TransferProgress) => void) {
     return this.progress.on(cb);

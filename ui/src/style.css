@@ -68,3 +68,22 @@ html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:
 #modal th, #modal td { text-align:left; padding:3px 8px; border-bottom:1px solid #444; }
 #modal .failed { color:#f66; }
 #modal .warn { color:var(--warn); }
+
+#work { flex:1; min-height:0; display:flex; }
+#files { width:340px; background:var(--panel); border-left:1px solid #000; display:flex; flex-direction:column; min-height:0; }
+#files[hidden] { display:none; }
+#files.dropping { outline:2px dashed var(--accent); outline-offset:-4px; }
+#files .fhead { padding:6px 8px; border-bottom:1px solid #000; display:flex; flex-direction:column; gap:6px; }
+#files .crumbs { display:flex; flex-wrap:wrap; gap:2px; align-items:center; }
+#files .crumbs button { background:none; border:0; color:var(--accent); cursor:pointer; padding:1px 3px; }
+#files .ftools { display:flex; gap:6px; }
+#files button.tool { background:var(--bg); color:var(--fg); border:1px solid #444; border-radius:4px; padding:2px 8px; cursor:pointer; }
+#files .flist { overflow:auto; flex:1; }
+#files .frow { display:flex; gap:8px; align-items:center; padding:3px 8px; cursor:default; }
+#files .frow:hover { background:#3a3d41; }
+#files .frow .nm { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#files .frow .sz { color:var(--muted); font-size:11px; }
+#files .frow .act { visibility:hidden; color:var(--muted); cursor:pointer; }
+#files .frow:hover .act { visibility:visible; }
+#files .ferr { color:#f66; padding:6px 8px; }
+#files .fempty { color:var(--muted); padding:12px; }

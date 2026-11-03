@@ -1,7 +1,8 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import type { ConnectionDto, ExportRequest, ForwardInfo, NodeDto, SessionState } from "./api";
+import type { ConnectionDto, ExportRequest, ForwardInfo, NodeDto, RemoteEntry, SessionState } from "./api";
+import { baseName, breadcrumbs, formatSize, joinPath, parentOf, validName } from "./files";
 import { backend, inTauri } from "./backend";
 import { closeLeaf, type Dir, leaves, newTab, type Pane, splitLeaf, type Tab } from "./layout";
 import "./style.css";
@@ -172,6 +173,155 @@ function openEditor(existing?: ConnectionDto) {
     void persist(upsertConnection(nodes, conn, f("folder").value || null));
   });
   f("name").focus();
+}
+
+// ---------- remote file browser (SFTP) ----------
+const fb = { open: false, sessionId: "", path: "", entries: [] as RemoteEntry[], error: "" };
+
+function toggleFiles() {
+  fb.open = !fb.open;
+  $("files").hidden = !fb.open;
+  if (fb.open) void syncFiles(true);
+  else $("files-btn").classList.remove("on");
+  setTimeout(() => views.forEach(safeFit), 50);
+}
+
+/** Follow the focused pane: load its home directory when the session changes. */
+async function syncFiles(force = false) {
+  if (!fb.open) return;
+  const v = focusedView();
+  if (!v) {
+    fb.sessionId = "";
+    fb.entries = [];
+    fb.error = "Open a session to browse its files.";
+    return renderFiles();
+  }
+  if (!force && v.sessionId === fb.sessionId) return;
+  fb.sessionId = v.sessionId;
+  fb.path = "";
+  await loadDir(".");
+}
+
+async function loadDir(path: string) {
+  if (!fb.sessionId) return;
+  try {
+    const d = await backend.sftpDir(fb.sessionId, path);
+    fb.path = d.path;
+    fb.entries = d.entries;
+    fb.error = "";
+  } catch (e) {
+    fb.error = String(e instanceof Error ? e.message : e);
+  }
+  renderFiles();
+}
+
+const refreshFiles = () => loadDir(fb.path || ".");
+
+function fileOp(label: string, op: () => Promise<unknown>) {
+  op().then(
+    () => void refreshFiles(),
+    (e: unknown) => toast(`${label} failed: ${String(e instanceof Error ? e.message : e)}`, true),
+  );
+}
+
+function uploadToCurrent(paths: string[]) {
+  if (!fb.sessionId || !fb.path) return;
+  for (const p of paths) {
+    backend.upload(fb.sessionId, p, fb.path).catch((e: unknown) => toast(`Upload failed: ${String(e)}`, true));
+  }
+}
+
+function downloadEntry(e: RemoteEntry) {
+  if (e.isDir) return;
+  void backend.pickFolder().then((dir) => {
+    if (!dir) return;
+    backend.download(fb.sessionId, joinPath(fb.path, e.name), dir).catch((err: unknown) => toast(`Download failed: ${String(err)}`, true));
+  });
+}
+
+function renderFiles() {
+  const box = $("files");
+  box.replaceChildren();
+  const head = document.createElement("div");
+  head.className = "fhead";
+  const crumbs = document.createElement("div");
+  crumbs.className = "crumbs";
+  crumbs.dataset.testid = "files-path";
+  for (const c of fb.path ? breadcrumbs(fb.path) : []) {
+    const b = document.createElement("button");
+    b.textContent = c.name;
+    b.addEventListener("click", () => void loadDir(c.path));
+    crumbs.append(b, document.createTextNode(c.name === "/" ? "" : "/"));
+  }
+  const tools = document.createElement("div");
+  tools.className = "ftools";
+  const tool = (label: string, id: string, fn: () => void) => {
+    const b = document.createElement("button");
+    b.className = "tool";
+    b.textContent = label;
+    b.dataset.testid = id;
+    b.addEventListener("click", fn);
+    tools.append(b);
+  };
+  tool("⬆ Up", "file-up", () => void loadDir(parentOf(fb.path || "/")));
+  tool("⟳", "file-refresh", () => void refreshFiles());
+  tool("⬆ Upload…", "file-upload", () => void backend.pickFiles().then(uploadToCurrent));
+  tool("＋ Folder", "file-mkdir", () => {
+    const name = prompt("New folder name");
+    if (name === null) return;
+    const bad = validName(name);
+    if (bad) return void toast(bad, true);
+    fileOp("Create folder", () => backend.sftpMkdir(fb.sessionId, joinPath(fb.path, name.trim())));
+  });
+  head.append(crumbs, tools);
+  box.append(head);
+
+  if (fb.error) {
+    const err = document.createElement("div");
+    err.className = "ferr";
+    err.dataset.testid = "files-error";
+    err.textContent = fb.error;
+    box.append(err);
+    return;
+  }
+  const list = document.createElement("div");
+  list.className = "flist";
+  list.dataset.testid = "files-list";
+  if (!fb.entries.length) list.innerHTML = '<div class="fempty">This folder is empty. Drop files here to upload.</div>';
+  for (const e of fb.entries) {
+    const row = document.createElement("div");
+    row.className = "frow";
+    row.dataset.testid = `file-row-${e.name}`;
+    row.innerHTML = `<span>${e.isDir ? "📁" : "📄"}</span><span class="nm" title="${esc(e.name)}">${esc(e.name)}</span><span class="sz">${e.isDir ? "" : formatSize(e.size)}</span>`;
+    const act = (label: string, id: string, title: string, fn: () => void) => {
+      const a = document.createElement("span");
+      a.className = "act";
+      a.textContent = label;
+      a.title = title;
+      a.dataset.testid = `${id}-${e.name}`;
+      a.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        fn();
+      });
+      row.append(a);
+    };
+    if (!e.isDir) act("⬇", "file-download", "Download", () => downloadEntry(e));
+    act("✎", "file-rename", "Rename", () => {
+      const to = prompt("Rename to", e.name);
+      if (to === null || to.trim() === e.name) return;
+      const bad = validName(to);
+      if (bad) return void toast(bad, true);
+      fileOp("Rename", () => backend.sftpRename(fb.sessionId, joinPath(fb.path, e.name), joinPath(fb.path, to.trim())));
+    });
+    act("✕", "file-delete", "Delete", () => {
+      if (confirm(`Delete ${e.isDir ? "folder" : "file"} "${e.name}"?`)) {
+        fileOp("Delete", () => backend.sftpRemove(fb.sessionId, joinPath(fb.path, e.name), e.isDir));
+      }
+    });
+    row.addEventListener("dblclick", () => (e.isDir ? void loadDir(joinPath(fb.path, e.name)) : downloadEntry(e)));
+    list.append(row);
+  }
+  box.append(list);
 }
 
 // ---------- connection state ----------
@@ -491,6 +641,7 @@ function focusLeaf(leafId: string) {
 }
 
 function markFocus() {
+  queueMicrotask(() => void syncFiles());
   queueMicrotask(refreshRecUi);
   const t = currentTab();
   for (const l of document.querySelectorAll<HTMLElement>(".leaf")) l.classList.remove("focus");
@@ -662,6 +813,8 @@ async function wireTauriDrop() {
     else if (p.type === "over") views.forEach((v) => v.el.classList.toggle("dropping", v === at(p.position.x, p.position.y)));
     else if (p.type === "drop") {
       views.forEach((v) => v.el.classList.remove("dropping"));
+      const overPanel = document.elementFromPoint(p.position.x / devicePixelRatio, p.position.y / devicePixelRatio)?.closest("#files");
+      if (overPanel && fb.open) return uploadToCurrent(p.paths);
       const v = at(p.position.x, p.position.y);
       if (v) upload(v, p.paths);
     }
@@ -683,6 +836,7 @@ function toast(msg: string, error = false, id?: string) {
 }
 
 backend.onProgress((p) => {
+  if (p.finished && !p.error) void refreshFiles();
   if (p.error) toast(`Transfer failed: ${p.error}`, true, p.transferId);
   else if (p.finished) {
     const el = toast("Transfer complete", false, p.transferId);
@@ -743,6 +897,20 @@ $("split-row").addEventListener("click", () => split("row"));
 $("split-col").addEventListener("click", () => split("col"));
 $("close-pane").addEventListener("click", closePane);
 $("rec").addEventListener("click", () => void toggleRecording());
+$("files-btn").addEventListener("click", toggleFiles);
+{
+  const box = $("files");
+  box.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    box.classList.add("dropping");
+  });
+  box.addEventListener("dragleave", () => box.classList.remove("dropping"));
+  box.addEventListener("drop", (e) => {
+    e.preventDefault();
+    box.classList.remove("dropping");
+    uploadToCurrent(Array.from(e.dataTransfer?.files ?? []).map((f) => (f as File & { path?: string }).path ?? f.name));
+  });
+}
 $("forwards-btn").addEventListener("click", openForwards);
 $("export-log").addEventListener("click", openExport);
 $("search").addEventListener("input", renderTree);

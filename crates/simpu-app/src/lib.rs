@@ -6,7 +6,8 @@ use simpu_capture::Capture;
 use simpu_core::credentials::Credentials;
 use simpu_core::forward::ForwardInfo;
 use simpu_core::manager::{
-    CredentialPromptInfo, Events, Manager, PromptInfo, RemoteEntry, SessionState, TransferInfo,
+    CredentialPromptInfo, Events, Manager, PromptInfo, RemoteDir, RemoteEntry, SessionState,
+    TransferInfo,
 };
 use simpu_core::model::{Forward, Node, Tree};
 use std::sync::Arc;
@@ -200,6 +201,40 @@ async fn sftp_list(
 }
 
 #[tauri::command]
+async fn sftp_dir(
+    app: State<'_, App>,
+    session_id: String,
+    path: String,
+) -> Result<RemoteDir, String> {
+    app.sftp_dir(&session_id, &path).await
+}
+
+#[tauri::command]
+async fn sftp_mkdir(app: State<'_, App>, session_id: String, path: String) -> Result<(), String> {
+    app.sftp_mkdir(&session_id, &path).await
+}
+
+#[tauri::command]
+async fn sftp_rename(
+    app: State<'_, App>,
+    session_id: String,
+    from: String,
+    to: String,
+) -> Result<(), String> {
+    app.sftp_rename(&session_id, &from, &to).await
+}
+
+#[tauri::command]
+async fn sftp_remove(
+    app: State<'_, App>,
+    session_id: String,
+    path: String,
+    is_dir: bool,
+) -> Result<(), String> {
+    app.sftp_remove(&session_id, &path, is_dir).await
+}
+
+#[tauri::command]
 async fn sftp_upload(
     app: State<'_, App>,
     session_id: String,
@@ -252,6 +287,10 @@ pub fn run() {
             forward_list,
             import_ssh_config,
             sftp_list,
+            sftp_dir,
+            sftp_mkdir,
+            sftp_rename,
+            sftp_remove,
             sftp_upload,
             sftp_download
         ])

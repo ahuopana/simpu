@@ -478,3 +478,58 @@ async fn cancelling_the_passphrase_prompt_fails_cleanly() {
     t.await.unwrap();
     assert!(err.contains("passphrase entry cancelled"), "{err}");
 }
+
+#[tokio::test]
+async fn remote_file_browser_operations() {
+    let s = setup().await;
+    let answer = answer_next_prompt(&s, true);
+    s.mgr
+        .open("s1", &s.conn.id.to_string(), 80, 24)
+        .await
+        .unwrap();
+    answer.await.unwrap();
+    std::fs::create_dir(s.remote.path().join("logs")).unwrap();
+    std::fs::write(s.remote.path().join("logs/app.log"), b"hello").unwrap();
+    std::fs::write(s.remote.path().join("notes.txt"), b"12345678").unwrap();
+
+    // "." is the home directory (here the server root); the listing carries the absolute path
+    let home = s.mgr.sftp_dir("s1", ".").await.unwrap();
+    assert_eq!(home.path, "/");
+    let names: Vec<_> = home
+        .entries
+        .iter()
+        .map(|e| (e.name.as_str(), e.is_dir))
+        .collect();
+    assert_eq!(
+        names,
+        [("logs", true), ("notes.txt", false)],
+        "directories first"
+    );
+
+    let logs = s.mgr.sftp_dir("s1", "/logs/").await.unwrap();
+    assert_eq!((logs.path.as_str(), logs.entries.len()), ("/logs", 1));
+    assert_eq!(
+        s.mgr.sftp_dir("s1", "/logs/..").await.unwrap().path,
+        "/",
+        "parent resolves"
+    );
+    assert!(s.mgr.sftp_dir("s1", "/missing").await.is_err());
+
+    s.mgr.sftp_mkdir("s1", "/new").await.unwrap();
+    assert!(s.remote.path().join("new").is_dir());
+    s.mgr
+        .sftp_rename("s1", "/notes.txt", "/new/notes.txt")
+        .await
+        .unwrap();
+    assert!(s.remote.path().join("new/notes.txt").exists());
+    s.mgr
+        .sftp_remove("s1", "/new/notes.txt", false)
+        .await
+        .unwrap();
+    s.mgr.sftp_remove("s1", "/new", true).await.unwrap();
+    assert!(!s.remote.path().join("new").exists());
+    // non-empty directories are refused by the server, not silently deleted
+    assert!(s.mgr.sftp_remove("s1", "/logs", true).await.is_err());
+    assert!(s.remote.path().join("logs/app.log").exists());
+    assert!(s.mgr.sftp_dir("nope", ".").await.is_err());
+}
