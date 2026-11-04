@@ -602,3 +602,75 @@ async fn replacing_the_credential_providers_affects_new_sessions_only() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn folders_transfer_recursively_through_the_manager() {
+    let s = setup().await;
+    let answer = answer_next_prompt(&s, true);
+    s.mgr
+        .open("s1", &s.conn.id.to_string(), 80, 24)
+        .await
+        .unwrap();
+    answer.await.unwrap();
+
+    let src = s.dir.path().join("photos");
+    std::fs::create_dir_all(src.join("2026/summer")).unwrap();
+    std::fs::write(src.join("a.jpg"), vec![1u8; 70_000]).unwrap();
+    std::fs::write(src.join("2026/summer/b.jpg"), vec![2u8; 90_000]).unwrap();
+    let tid = s
+        .mgr
+        .upload("s1", src.to_str().unwrap(), "/")
+        .await
+        .unwrap();
+    until("folder upload", || {
+        s.events
+            .progress
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.transfer_id == tid && p.finished)
+    })
+    .await;
+    let last = s
+        .events
+        .progress
+        .lock()
+        .unwrap()
+        .iter()
+        .rfind(|p| p.transfer_id == tid)
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (last.done, last.total, last.error),
+        (160_000, 160_000, None)
+    );
+    assert_eq!(
+        std::fs::read(s.remote.path().join("photos/2026/summer/b.jpg"))
+            .unwrap()
+            .len(),
+        90_000
+    );
+
+    let out = tempfile::tempdir().unwrap();
+    let tid = s
+        .mgr
+        .download("s1", "/photos", out.path().to_str().unwrap())
+        .await
+        .unwrap();
+    until("folder download", || {
+        s.events
+            .progress
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.transfer_id == tid && p.finished)
+    })
+    .await;
+    assert_eq!(
+        std::fs::read(out.path().join("photos/a.jpg"))
+            .unwrap()
+            .len(),
+        70_000
+    );
+    assert!(out.path().join("photos/2026/summer/b.jpg").exists());
+}

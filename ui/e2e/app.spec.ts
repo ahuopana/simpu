@@ -511,6 +511,21 @@ test.describe("remote file browser", () => {
     expect((await backendOf(page)).downloads[0]).toMatchObject({ remotePath: "/home/user/notes.txt", localDir: "/tmp/downloads" });
   });
 
+  test("folders can be downloaded and uploaded as a whole", async ({ page }) => {
+    await openFiles(page);
+    await page.getByTestId("file-row-logs").hover();
+    await page.getByTestId("file-download-logs").click();
+    await expect.poll(async () => (await backendOf(page)).downloads.length).toBe(1);
+    expect((await backendOf(page)).downloads[0]).toMatchObject({ remotePath: "/home/user/logs", localDir: "/tmp/downloads" });
+
+    await page.evaluate(() => ((window as any).__simpu.backend.nextFolder = "/tmp/photos"));
+    await page.getByTestId("folder-upload").click();
+    await expect(page.getByTestId("file-row-photos")).toBeVisible();
+    expect((await backendOf(page)).uploads.at(-1)).toMatchObject({ localPath: "/tmp/photos", remoteDir: "/home/user" });
+    await page.getByTestId("file-row-photos").dblclick();
+    await expect(page.getByTestId("files-path")).toContainText("photos");
+  });
+
   test("a cancelled folder dialog downloads nothing; closing the panel hides it", async ({ page }) => {
     await openFiles(page);
     await page.evaluate(() => ((window as any).__simpu.backend.nextFolder = null));

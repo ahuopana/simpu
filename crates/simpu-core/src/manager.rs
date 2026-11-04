@@ -798,10 +798,20 @@ impl<E: Events> Manager<E> {
                     error: None,
                 })
             };
-            let result = if upload {
-                sftp.upload(&local, &remote, true, &cancel, report).await
+            // Folders are transferred recursively, single files as before.
+            let is_tree = if upload {
+                tokio::fs::metadata(&local)
+                    .await
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false)
             } else {
-                sftp.download(&remote, &local, true, &cancel, report).await
+                sftp.is_dir(&remote).await.unwrap_or(false)
+            };
+            let result = match (upload, is_tree) {
+                (true, true) => sftp.upload_tree(&local, &remote, &cancel, report).await,
+                (false, true) => sftp.download_tree(&remote, &local, &cancel, report).await,
+                (true, false) => sftp.upload(&local, &remote, true, &cancel, report).await,
+                (false, false) => sftp.download(&remote, &local, true, &cancel, report).await,
             };
             match result {
                 Ok(n) => events.progress(TransferInfo {

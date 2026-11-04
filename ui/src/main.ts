@@ -296,7 +296,6 @@ function uploadToCurrent(paths: string[]) {
 }
 
 function downloadEntry(e: RemoteEntry) {
-  if (e.isDir) return;
   void backend.pickFolder().then((dir) => {
     if (!dir) return;
     backend.download(fb.sessionId, joinPath(fb.path, e.name), dir).catch((err: unknown) => toast(`Download failed: ${String(err)}`, true));
@@ -330,6 +329,11 @@ function renderFiles() {
   tool("⬆ Up", "file-up", () => void loadDir(parentOf(fb.path || "/")));
   tool("⟳", "file-refresh", () => void refreshFiles());
   tool("⬆ Upload…", "file-upload", () => void backend.pickFiles().then(uploadToCurrent));
+  tool("⬆ Folder…", "folder-upload", () =>
+    void backend.pickFolder().then((p) => {
+      if (p) uploadToCurrent([p]);
+    }),
+  );
   tool("＋ Folder", "file-mkdir", () => {
     const name = prompt("New folder name");
     if (name === null) return;
@@ -369,7 +373,7 @@ function renderFiles() {
       });
       row.append(a);
     };
-    if (!e.isDir) act("⬇", "file-download", "Download", () => downloadEntry(e));
+    act("⬇", "file-download", e.isDir ? "Download folder" : "Download", () => downloadEntry(e));
     act("✎", "file-rename", "Rename", () => {
       const to = prompt("Rename to", e.name);
       if (to === null || to.trim() === e.name) return;

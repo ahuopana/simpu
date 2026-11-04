@@ -404,7 +404,10 @@ export class MockBackend implements Backend {
     this.remoteFs.set(parent, this.dirEntries(parent).filter((e) => e.name !== name));
     this.remoteFs.delete(abs);
   }
+  /** Local paths the user picked as folders (so `upload` can tell folders from files). */
+  pickedFolders = new Set<string>();
   async pickFolder() {
+    if (this.nextFolder) this.pickedFolders.add(this.nextFolder);
     return this.nextFolder;
   }
   async pickFiles() {
@@ -421,7 +424,11 @@ export class MockBackend implements Backend {
     queueMicrotask(() => {
       this.progress.emit({ transferId, done: 5, total: 10, finished: false });
       const list = this.remoteFs.get(dir);
-      if (list && !list.some((e) => e.name === name)) list.push({ name, isDir: false, size: 10 });
+      const isDir = this.pickedFolders.has(localPath);
+      if (list && !list.some((e) => e.name === name)) {
+        list.push({ name, isDir, size: isDir ? 0 : 10 });
+        if (isDir) this.remoteFs.set(`${dir === "/" ? "" : dir}/${name}`, []);
+      }
       this.progress.emit({ transferId, done: 10, total: 10, finished: true });
     });
     return transferId;

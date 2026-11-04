@@ -173,3 +173,119 @@ async fn mkdir_rename_remove() {
     assert!(!remote.path().join("d/b").exists());
     assert!(sftp.home().await.is_ok());
 }
+
+fn write(root: &std::path::Path, rel: &str, bytes: &[u8]) {
+    let p = root.join(rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, bytes).unwrap();
+}
+
+#[tokio::test]
+async fn upload_and_download_whole_directory_trees() {
+    let remote = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let (_s, session) = connect(remote.path()).await;
+    let sftp = session.open_sftp().await.unwrap();
+    let cancel = AtomicBool::new(false);
+
+    // local tree: nested dirs, an empty dir, files of different sizes
+    let src = local.path().join("project");
+    write(&src, "README.md", b"hello");
+    write(&src, "src/main.rs", &data(150_000));
+    write(&src, "src/deep/er/lib.rs", b"x");
+    std::fs::create_dir_all(src.join("empty")).unwrap();
+    std::fs::create_dir_all(src.join("empty-too/inner")).unwrap();
+
+    let mut seen: Vec<Progress> = vec![];
+    let total = sftp
+        .upload_tree(&src, "/project", &cancel, |p| seen.push(p))
+        .await
+        .unwrap();
+    assert_eq!(total, 5 + 150_000 + 1);
+    assert_eq!(seen.first().unwrap().done, 0);
+    assert_eq!(*seen.last().unwrap(), Progress { done: total, total });
+    assert!(
+        seen.windows(2).all(|w| w[0].done <= w[1].done),
+        "monotonic: {seen:?}"
+    );
+    assert!(seen.iter().all(|p| p.total == total));
+    assert_eq!(
+        std::fs::read(remote.path().join("project/src/main.rs")).unwrap(),
+        data(150_000)
+    );
+    assert!(remote.path().join("project/empty").is_dir());
+    assert!(remote.path().join("project/empty-too/inner").is_dir());
+    assert_eq!(
+        std::fs::read(remote.path().join("project/src/deep/er/lib.rs")).unwrap(),
+        b"x"
+    );
+
+    // uploading again resumes/skips and still succeeds (existing directories are fine)
+    sftp.upload_tree(&src, "/project", &cancel, |_| {})
+        .await
+        .unwrap();
+
+    // and download it back somewhere else
+    let dst = local.path().join("copy");
+    sftp.download_tree("/project", &dst, &cancel, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(dst.join("src/main.rs")).unwrap(),
+        data(150_000)
+    );
+    assert_eq!(std::fs::read(dst.join("README.md")).unwrap(), b"hello");
+    assert!(dst.join("empty").is_dir() && dst.join("empty-too/inner").is_dir());
+}
+
+#[tokio::test]
+async fn directory_transfer_can_be_cancelled() {
+    let remote = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let (_s, session) = connect(remote.path()).await;
+    let sftp = session.open_sftp().await.unwrap();
+    let src = local.path().join("big");
+    for i in 0..4 {
+        write(&src, &format!("f{i}.bin"), &data(300_000));
+    }
+    let cancel = AtomicBool::new(false);
+    let err = sftp
+        .upload_tree(&src, "/big", &cancel, |p| {
+            if p.done > 100_000 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, SftpError::Cancelled));
+    assert!(
+        !remote.path().join("big/f3.bin").exists(),
+        "later files were not started"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hostile_server_file_name_never_escapes_the_download_folder() {
+    let remote = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    write(remote.path(), "dir/fine.txt", b"ok");
+    // a file whose name contains a backslash (a path separator on Windows)
+    write(remote.path(), "dir/..\\..\\evil.txt", b"pwned");
+    let (_s, session) = connect(remote.path()).await;
+    let sftp = session.open_sftp().await.unwrap();
+    let dst = local.path().join("out");
+    let err = sftp
+        .download_tree("/dir", &dst, &AtomicBool::new(false), |_| {})
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, SftpError::UnsafeName(n) if n.contains("evil")),
+        "{err}"
+    );
+    assert!(!local.path().join("evil.txt").exists());
+    assert!(
+        !dst.join("fine.txt").exists(),
+        "nothing is written before the whole listing is vetted"
+    );
+}

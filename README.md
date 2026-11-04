@@ -14,7 +14,7 @@ plugin work in tests; there is no release yet.
 - SSH, SFTP, SCP and Telnet
 - Connection tree: name, host, user, protocol, folders, search
 - Multiple sessions in tabs; split panes
-- Drag-and-drop file transfer and a remote file browser (SFTP panel: browse, upload, download, rename, delete)
+- Drag-and-drop file transfer and a remote file browser (SFTP panel: browse, upload, download, rename, delete; whole folders too)
 - Authentication: passwords, key files (with passphrase prompts), ssh-agent / Pageant
 - Jump host chains, with credentials from a password manager
 - Port forwarding (local, remote, SOCKS5), tunnel-only connections

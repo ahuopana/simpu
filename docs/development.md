@@ -55,8 +55,12 @@ item's notes). Jump hosts use the same mechanism per hop.
 breadcrumbs, up/refresh, folders first. Double-click a folder to enter it, a file to download it (a
 folder dialog asks where to). Hover a row for download / rename / delete (folders must be empty);
 "＋ Folder" creates one; "⬆ Upload…" or dropping files on the panel uploads into the current folder.
-Dropping files on a terminal still uploads to the home directory. Dragging files *out* of the panel to
-Explorer is not supported yet.
+Dropping files on a terminal still uploads to the home directory. Folders work too: the ⬇ on a folder row downloads it recursively (into a folder of the same name inside
+the one you pick), and "⬆ Folder…" or dropping a folder on the panel uploads it recursively; progress is one
+aggregated bar. Symbolic links are skipped, and file names from the server that could write outside the target
+(`..`, separators, `:` and other characters Windows reserves) abort the download before anything is written.
+Dragging files *out* of the panel to Explorer is not supported (it needs the file on disk before the drag
+starts; the download button covers this).
 
 ## Keys, passphrases and ssh-agent
 
