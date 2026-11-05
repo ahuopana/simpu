@@ -29,8 +29,15 @@ come back by itself, while for an interactive shell the user usually wants to de
 - Forwards bind to `127.0.0.1` by default; other addresses are allowed but flagged
   in the UI. SOCKS5 supports CONNECT without authentication only.
 
+## Telnet
+Telnet sessions use the same supervisor and policies. They have no SSH keepalive, so dead links are detected
+with TCP keepalives (same interval setting, rounded up to whole seconds) plus the connection closing.
+Reconnecting opens a fresh TCP connection and the server shows its login prompt again (the pane says
+"log in again"); nothing is typed automatically. Telnet cannot tell a logout from a drop, so with the `auto`
+policy a deliberate logout also reconnects; the default for plain shells is `ask`, which avoids that.
+
 ## Consequences
-Telnet sessions are not supervised yet (no reconnect). Remote forwards require
+Remote forwards require
 `AllowTcpForwarding` on the server; refusals are shown per forward. The supervisor
 logic is tested through `Manager` with a controllable in-process server (kill
 connections, black-holed link), on Linux and Windows CI.

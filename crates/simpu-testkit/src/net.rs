@@ -86,3 +86,83 @@ where
         }
     }
 }
+
+/// A tiny telnet server: sends `login: `, answers every received chunk with `got:<chunk>`,
+/// and can drop all clients, stop listening and start again on the same port.
+pub struct TelnetServer {
+    pub port: u16,
+    pub accepted: Arc<std::sync::atomic::AtomicUsize>,
+    kill: tokio::sync::watch::Sender<u64>,
+    task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl TelnetServer {
+    fn spawn(
+        l: TcpListener,
+        count: Arc<std::sync::atomic::AtomicUsize>,
+        rx: tokio::sync::watch::Receiver<u64>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                count.fetch_add(1, Ordering::SeqCst);
+                let mut rx = rx.clone();
+                let generation = *rx.borrow();
+                tokio::spawn(async move {
+                    let _ = s.write_all(b"login: ").await;
+                    let mut buf = [0u8; 1024];
+                    loop {
+                        tokio::select! {
+                            n = s.read(&mut buf) => match n {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    let mut out = b"got:".to_vec();
+                                    out.extend_from_slice(&buf[..n]);
+                                    if s.write_all(&out).await.is_err() { break; }
+                                }
+                            },
+                            changed = rx.changed() => {
+                                if changed.is_err() || *rx.borrow() != generation { break; }
+                            }
+                        }
+                    }
+                });
+            }
+        })
+    }
+
+    pub async fn start() -> Self {
+        let l = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let port = l.local_addr().expect("addr").port();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (kill, rx) = tokio::sync::watch::channel(0u64);
+        let task = Self::spawn(l, accepted.clone(), rx);
+        Self {
+            port,
+            accepted,
+            kill,
+            task: std::sync::Mutex::new(Some(task)),
+        }
+    }
+
+    /// Close every client connection (the server keeps accepting new ones).
+    pub fn kill_connections(&self) {
+        self.kill.send_modify(|g| *g += 1);
+    }
+
+    /// Drop all clients and stop listening: new connections are refused until [`restart`](Self::restart).
+    pub fn stop(&self) {
+        self.kill_connections();
+        if let Some(t) = self.task.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            t.abort();
+        }
+    }
+
+    /// Listen again on the same port.
+    pub async fn restart(&self) {
+        let l = TcpListener::bind(("127.0.0.1", self.port))
+            .await
+            .expect("rebind");
+        let task = Self::spawn(l, self.accepted.clone(), self.kill.subscribe());
+        *self.task.lock().unwrap_or_else(|p| p.into_inner()) = Some(task);
+    }
+}

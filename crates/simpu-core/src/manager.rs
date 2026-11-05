@@ -478,10 +478,10 @@ impl<E: Events> Manager<E> {
         let tree = self.tree();
         let conn = tree.find(id).ok_or("unknown connection")?.clone();
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
+        let (tx, rx) = mpsc::unbounded_channel::<Cmd>();
         let events = self.events.clone();
         let sid = session_id.to_string();
-        let mut tap = Tap {
+        let tap = Tap {
             meta: SessionMeta {
                 id: sid.clone(),
                 connection: conn.name.clone(),
@@ -493,34 +493,49 @@ impl<E: Events> Manager<E> {
         };
 
         if conn.protocol == Protocol::Telnet {
-            let mut t =
-                TelnetSession::connect(&conn.host, conn.effective_port(), cols as u16, rows as u16)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            let w: TelnetWriter = t.writer();
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        ev = t.next() => match ev {
-                            TelnetEvent::Data(d) => { tap.data(&d); events.data(&sid, d) }
-                            TelnetEvent::Closed => { tap.finish(); events.closed(&sid, "connection closed".into()); break; }
-                        },
-                        cmd = rx.recv() => match cmd {
-                            Some(Cmd::Write(b)) => { let _ = w.write(&b).await; }
-                            Some(Cmd::Resize(c, r)) => { let _ = w.resize(c as u16, r as u16).await; }
-                            Some(Cmd::Reconnect) => {}
-                            Some(Cmd::Close) | None => { tap.finish(); break }
-                        },
-                    }
-                }
-            });
-            lock(&self.sessions).insert(
-                session_id.to_string(),
-                Active {
-                    tx,
-                    shared: Arc::new(Shared::default()),
-                },
-            );
+            let opts = lock(&self.connect_opts).clone();
+            let t = tokio::time::timeout(
+                opts.connect_timeout,
+                TelnetSession::connect_with(
+                    &conn.host,
+                    conn.effective_port(),
+                    cols as u16,
+                    rows as u16,
+                    opts.keepalive_interval,
+                ),
+            )
+            .await
+            .map_err(|_| format!("{}: connection timed out", conn.name))?
+            .map_err(|e| e.to_string())?;
+            let shared = Arc::new(Shared::default());
+            let sup = Supervisor {
+                events,
+                sid,
+                tap,
+                rx,
+                shared: shared.clone(),
+                hops: Vec::new(),
+                known: self.known.clone(),
+                known_path: self.known_path.clone(),
+                policy: self.policy(),
+                opts,
+                rc: lock(&self.reconnect_cfg).clone(),
+                mode: conn.effective_reconnect(),
+                no_shell: false,
+                cols,
+                rows,
+                session: None,
+                shell: None,
+                telnet: Some(TelnetLink {
+                    host: conn.host.clone(),
+                    port: conn.effective_port(),
+                    writer: Some(t.writer()),
+                    session: Some(t),
+                }),
+            };
+            sup.events.session_state(&sup.sid, SessionState::Connected);
+            lock(&self.sessions).insert(session_id.to_string(), Active { tx, shared });
+            tokio::spawn(sup.run());
             return Ok(());
         }
 
@@ -587,8 +602,9 @@ impl<E: Events> Manager<E> {
             no_shell: conn.no_shell,
             cols,
             rows,
-            session: session.clone(),
+            session: Some(session.clone()),
             shell,
+            telnet: None,
         };
         sup.install(session, false).await;
         lock(&self.sessions).insert(session_id.to_string(), Active { tx, shared });
@@ -906,8 +922,17 @@ struct Supervisor<E: Events> {
     no_shell: bool,
     cols: u32,
     rows: u32,
-    session: Arc<SshSession>,
+    session: Option<Arc<SshSession>>,
     shell: Option<Shell>,
+    /// Set for telnet sessions (no SSH session, shell or forwards).
+    telnet: Option<TelnetLink>,
+}
+
+struct TelnetLink {
+    host: String,
+    port: u16,
+    session: Option<TelnetSession>,
+    writer: Option<TelnetWriter>,
 }
 
 impl<E: Events> Supervisor<E> {
@@ -921,7 +946,7 @@ impl<E: Events> Supervisor<E> {
             fm.start_with_id(id, spec).await;
         }
         *lock(&self.shared.fwd) = Some(fm);
-        self.session = session;
+        self.session = Some(session);
         if announce {
             self.note("\r\n\x1b[32m[reconnected]\x1b[0m\r\n");
         }
@@ -940,6 +965,10 @@ impl<E: Events> Supervisor<E> {
         *lock(&self.shared.ssh) = None;
         *lock(&self.shared.fwd) = None;
         self.shell = None;
+        if let Some(t) = self.telnet.as_mut() {
+            t.session = None;
+            t.writer = None;
+        }
         self.events.forwards(&self.sid, forward_list(&self.shared));
     }
 
@@ -954,6 +983,7 @@ impl<E: Events> Supervisor<E> {
                 sid,
                 cols,
                 rows,
+                telnet,
                 ..
             } = self;
             tokio::select! {
@@ -967,22 +997,77 @@ impl<E: Events> Supervisor<E> {
                     ShellEvent::Exit(code) => return Ended::Exited(code),
                     ShellEvent::Closed => return Ended::Dropped("connection closed".into()),
                 },
+                ev = async {
+                    match telnet.as_mut().and_then(|t| t.session.as_mut()) {
+                        Some(t) => t.next().await,
+                        None => std::future::pending().await,
+                    }
+                } => match ev {
+                    TelnetEvent::Data(d) => { tap.data(&d); events.data(sid, d); }
+                    // Telnet cannot tell a logout from a drop; the policy decides what happens.
+                    TelnetEvent::Closed => return Ended::Dropped("connection closed".into()),
+                },
                 cmd = rx.recv() => match cmd {
-                    Some(Cmd::Write(b)) => { if let Some(s) = shell.as_ref() { let _ = s.write(&b).await; } }
+                    Some(Cmd::Write(b)) => {
+                        if let Some(s) = shell.as_ref() { let _ = s.write(&b).await; }
+                        if let Some(w) = telnet.as_ref().and_then(|t| t.writer.as_ref()) { let _ = w.write(&b).await; }
+                    }
                     Some(Cmd::Resize(c, r)) => {
                         *cols = c;
                         *rows = r;
                         if let Some(s) = shell.as_ref() { let _ = s.resize(c, r).await; }
+                        if let Some(w) = telnet.as_ref().and_then(|t| t.writer.as_ref()) { let _ = w.resize(c as u16, r as u16).await; }
                     }
                     Some(Cmd::Reconnect) => {}
                     Some(Cmd::Close) | None => return Ended::UserClose,
                 },
-                () = session.closed() => return Ended::Dropped("connection lost".into()),
+                () = async {
+                    match session {
+                        Some(s) => s.closed().await,
+                        None => std::future::pending().await,
+                    }
+                } => return Ended::Dropped("connection lost".into()),
             }
         }
     }
 
+    /// Reconnect a telnet session: plain TCP again, then the server shows its login prompt anew.
+    async fn try_connect_telnet(&mut self) -> Result<(), SshError> {
+        let (host, port) = match self.telnet.as_ref() {
+            Some(t) => (t.host.clone(), t.port),
+            None => return Ok(()),
+        };
+        let fail = |kind| SshError {
+            index: 0,
+            name: host.clone(),
+            kind,
+        };
+        let connect = TelnetSession::connect_with(
+            &host,
+            port,
+            self.cols as u16,
+            self.rows as u16,
+            self.opts.keepalive_interval,
+        );
+        let t = match tokio::time::timeout(self.opts.connect_timeout, connect).await {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => return Err(fail(ErrorKind::Connect(e.to_string()))),
+            Err(_) => return Err(fail(ErrorKind::Connect("timed out".into()))),
+        };
+        if let Some(link) = self.telnet.as_mut() {
+            link.writer = Some(t.writer());
+            link.session = Some(t);
+        }
+        self.note("\r\n\x1b[32m[reconnected; log in again]\x1b[0m\r\n");
+        self.events
+            .session_state(&self.sid, SessionState::Connected);
+        Ok(())
+    }
+
     async fn try_connect(&mut self) -> Result<(), SshError> {
+        if self.telnet.is_some() {
+            return self.try_connect_telnet().await;
+        }
         let s = SshSession::connect_with(
             &self.hops,
             self.known.clone(),

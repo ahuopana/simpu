@@ -393,6 +393,18 @@ test.describe("forwards and reconnect", () => {
     await expect(page.locator(".leaf")).toHaveCount(0);
   });
 
+  test("telnet sessions reconnect like SSH ones (asks by default, keeps the plaintext warning)", async ({ page }) => {
+    await open(page, "switch");
+    await expect.poll(() => screen(page)).toContain("Connected");
+    const sid = await page.evaluate(() => [...(window as any).__simpu.backend.sessions.keys()][0]);
+    await page.evaluate((id) => (window as any).__simpu.backend.dropSession(id), sid);
+    await expect(page.getByTestId("status-text")).toContainText("Connection lost");
+    await page.getByTestId("reconnect").click();
+    await expect(page.getByTestId("statusbar")).toBeHidden();
+    await expect(page.getByTestId("banner")).toContainText("not encrypted");
+    expect(await page.evaluate(() => (window as any).__simpu.backend.reconnects.length)).toBe(1);
+  });
+
   test("off policy closes the session", async ({ page }) => {
     await newConn(page, { reconnect: "off" });
     await openTun(page);

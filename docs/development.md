@@ -96,7 +96,8 @@ In the connection editor, **Forwards** takes one line per forward in `ssh` style
 prefix the port with a bind address (`L 0.0.0.0:8080:web:80`) to expose it to other
 machines. **On disconnect** chooses auto / ask / close (default: auto when forwards
 exist, otherwise ask). **Tunnel only** skips the shell (like `ssh -N`). The
-"⇄ Forwards" toolbar button shows live forwards of the focused session and lets you
+Telnet connections have the same "On disconnect" choice (reconnect = new TCP connection and a fresh login prompt;
+with *automatic* a deliberate logout also reconnects, so keep telnet on *ask*). The "⇄ Forwards" toolbar button shows live forwards of the focused session and lets you
 add or stop them. `LocalForward`, `RemoteForward`, `DynamicForward` and
 `SessionType none` are imported from `~/.ssh/config`.
 

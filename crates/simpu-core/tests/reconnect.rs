@@ -379,3 +379,170 @@ async fn a_forward_that_cannot_bind_does_not_break_the_session() {
         matches!(&list[0].state, ForwardState::Failed { reason } if reason.contains("cannot listen"))
     );
 }
+
+// ---------- telnet ----------
+
+use simpu_testkit::net::TelnetServer;
+
+fn telnet_env(server: &TelnetServer, tweak: impl FnOnce(&mut Connection)) -> Env {
+    let mut conn = Connection::new("sw1", Protocol::Telnet, "127.0.0.1", "admin");
+    conn.port = Some(server.port);
+    tweak(&mut conn);
+    let dir = tempfile::tempdir().unwrap();
+    let ev = Arc::new(Rec::default());
+    let mgr = Arc::new(
+        Manager::new(ev.clone(), dir.path().to_path_buf(), Credentials::default()).unwrap(),
+    );
+    mgr.save_tree(Tree {
+        nodes: vec![Node::Connection(conn.clone())],
+    })
+    .unwrap();
+    mgr.set_reconnect_config(ReconnectConfig {
+        base: Duration::from_millis(50),
+        max: Duration::from_millis(200),
+        max_attempts: None,
+    });
+    mgr.set_connect_options(ConnectOptions {
+        keepalive_interval: Some(Duration::from_millis(150)),
+        keepalive_max: 2,
+        connect_timeout: Duration::from_millis(600),
+    });
+    Env {
+        mgr,
+        ev,
+        conn,
+        _dir: dir,
+    }
+}
+
+#[tokio::test]
+async fn telnet_ask_policy_waits_then_reconnects_with_a_fresh_login_prompt() {
+    let srv = TelnetServer::start().await;
+    let e = telnet_env(&srv, |_| {});
+    assert_eq!(e.conn.effective_reconnect(), ReconnectPolicy::Ask);
+    e.mgr
+        .open("t1", &e.conn.id.to_string(), 80, 24)
+        .await
+        .unwrap();
+    until("login prompt", || count(&e, "login: ") == 1).await;
+    e.mgr.write("t1", b"admin\r".to_vec());
+    until("echo", || count(&e, "got:admin") == 1).await;
+
+    srv.kill_connections();
+    until("lost", || {
+        has_state(&e, |s| matches!(s, SessionState::Lost { .. }))
+    })
+    .await;
+    assert_eq!(count(&e, "[connection lost]"), 1);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        srv.accepted.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "no automatic reconnect"
+    );
+
+    e.mgr.reconnect("t1");
+    until("second login prompt", || count(&e, "login: ") == 2).await;
+    assert_eq!(count(&e, "[reconnected; log in again]"), 1);
+    e.mgr.write("t1", b"again\r".to_vec());
+    until("input flows after reconnect", || {
+        count(&e, "got:again") == 1
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn telnet_auto_policy_reconnects_by_itself_and_off_closes() {
+    let srv = TelnetServer::start().await;
+    let e = telnet_env(&srv, |c| c.reconnect = Some(ReconnectPolicy::Auto));
+    e.mgr
+        .open("t1", &e.conn.id.to_string(), 80, 24)
+        .await
+        .unwrap();
+    until("login prompt", || count(&e, "login: ") == 1).await;
+    srv.kill_connections();
+    until("auto reconnect", || count(&e, "login: ") == 2).await;
+    assert!(has_state(&e, |s| matches!(
+        s,
+        SessionState::Reconnecting { attempt: 1, .. }
+    )));
+    assert_eq!(connected_count(&e), 2);
+
+    let off = telnet_env(&srv, |c| c.reconnect = Some(ReconnectPolicy::Off));
+    off.mgr
+        .open("t2", &off.conn.id.to_string(), 80, 24)
+        .await
+        .unwrap();
+    until("prompt", || count(&off, "login: ") == 1).await;
+    srv.kill_connections();
+    until("closed", || !off.ev.closed.lock().unwrap().is_empty()).await;
+    assert!(has_state(&off, |s| matches!(
+        s,
+        SessionState::Closed { .. }
+    )));
+}
+
+#[tokio::test]
+async fn telnet_keeps_retrying_while_the_server_is_down_then_reconnects_when_it_returns() {
+    let srv = TelnetServer::start().await;
+    let e = telnet_env(&srv, |c| c.reconnect = Some(ReconnectPolicy::Auto));
+    e.mgr
+        .open("t1", &e.conn.id.to_string(), 80, 24)
+        .await
+        .unwrap();
+    until("prompt", || count(&e, "login: ") == 1).await;
+
+    srv.stop();
+    until("several failed attempts", || {
+        has_state(&e, |s| {
+            matches!(s, SessionState::Reconnecting { attempt: 3, .. })
+        })
+    })
+    .await;
+    assert_eq!(connected_count(&e), 1, "still down");
+
+    srv.restart().await;
+    until("reconnected", || connected_count(&e) == 2).await;
+    until("fresh login prompt", || count(&e, "login: ") == 2).await;
+}
+
+#[tokio::test]
+async fn closing_a_telnet_session_during_reconnect_stops_the_retries() {
+    let srv = TelnetServer::start().await;
+    let e = telnet_env(&srv, |c| c.reconnect = Some(ReconnectPolicy::Auto));
+    e.mgr
+        .open("t1", &e.conn.id.to_string(), 80, 24)
+        .await
+        .unwrap();
+    until("prompt", || count(&e, "login: ") == 1).await;
+    srv.stop();
+    until("retrying", || {
+        has_state(&e, |s| matches!(s, SessionState::Reconnecting { .. }))
+    })
+    .await;
+    e.mgr.close("t1");
+    srv.restart().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        connected_count(&e),
+        1,
+        "the closed session did not come back"
+    );
+    assert_eq!(srv.accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn telnet_open_to_a_closed_port_fails_cleanly() {
+    let srv = TelnetServer::start().await;
+    let e = telnet_env(&srv, |c| c.port = Some(free_port()));
+    let err = e
+        .mgr
+        .open("t1", &e.conn.id.to_string(), 80, 24)
+        .await
+        .unwrap_err();
+    assert!(!err.is_empty());
+    assert!(
+        e.ev.states.lock().unwrap().is_empty(),
+        "no state events for a session that never started"
+    );
+}

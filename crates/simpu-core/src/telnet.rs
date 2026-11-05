@@ -245,7 +245,26 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl TelnetSession {
     pub async fn connect(host: &str, port: u16, cols: u16, rows: u16) -> std::io::Result<Self> {
-        let (reader, write) = TcpStream::connect((host, port)).await?.into_split();
+        Self::connect_with(host, port, cols, rows, None).await
+    }
+
+    /// Like [`connect`](Self::connect); with `keepalive`, TCP keepalives detect a dead link
+    /// (telnet itself has no keepalive).
+    pub async fn connect_with(
+        host: &str,
+        port: u16,
+        cols: u16,
+        rows: u16,
+        keepalive: Option<std::time::Duration>,
+    ) -> std::io::Result<Self> {
+        let stream = TcpStream::connect((host, port)).await?;
+        if let Some(d) = keepalive {
+            // The OS takes whole seconds (0 is invalid); a failure here must not stop the connection.
+            let d = d.max(std::time::Duration::from_secs(1));
+            let ka = socket2::TcpKeepalive::new().with_time(d).with_interval(d);
+            let _ = socket2::SockRef::from(&stream).set_tcp_keepalive(&ka);
+        }
+        let (reader, write) = stream.into_split();
         Ok(Self {
             reader,
             writer: TelnetWriter {
