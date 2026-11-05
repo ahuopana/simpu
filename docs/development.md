@@ -128,6 +128,18 @@ prints failures as annotations: `gh api repos/OWNER/REPO/check-runs/ID/annotatio
 GitHub provides Windows as VM runners (`windows-latest`), not as containers.
 See ADR 0004.
 
+## Building the Linux packages
+
+    cargo build --release -p simpu-plugin-bitwarden -p simpu-plugin-keepassxc
+    cd crates/simpu-app
+    ../../ui/node_modules/.bin/tauri build --bundles deb,appimage --config tauri.bundle.linux.conf.json
+
+Output: `target/release/bundle/deb/*.deb` and `target/release/bundle/appimage/*.AppImage`. The plugins are placed
+next to the app executable (`/usr/bin` in the .deb, `usr/bin` inside the AppImage) because the app looks for them
+there. The AppImage build downloads `linuxdeploy` from GitHub on first use and needs `libfuse2` (or run the tools
+with `APPIMAGE_EXTRACT_AND_RUN=1`). A full release build takes about 4 minutes; delete `target/debug` first if
+the disk is tight. To eyeball the UI headlessly: `xvfb-run` the binary and capture with `import -window root`.
+
 ## Cross-compiling for Windows
 
     rustup target add x86_64-pc-windows-msvc

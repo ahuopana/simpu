@@ -25,8 +25,16 @@ plugin work in tests; there is no release yet.
 
 ## Install
 
-No release yet. Windows 10/11 x64 will be supported; the installer will be
-published on the GitHub Releases page.
+No release yet; installers are built by CI (Actions artifacts of the `main` branch).
+
+- **Windows 10/11 x64:** run the NSIS installer (`simpu-windows-installer`).
+- **Linux x64 (Debian/Ubuntu):** `sudo apt install ./Simpu_0.1.0_amd64.deb` (pulls in `libwebkit2gtk-4.1-0` and
+  `libgtk-3-0`), then start **Simpu** from the application menu or run `simpu-app`.
+- **Linux x64 (any distro):** `chmod +x Simpu_0.1.0_amd64.AppImage && ./Simpu_0.1.0_amd64.AppImage`
+  (self-contained, about 80 MB). If your system has no FUSE 2, use `--appimage-extract-and-run`.
+
+Both Linux packages include the Bitwarden and KeePassXC plugins. Settings and connections are stored in
+`~/.config/dev.simpu.app/` (Windows: `%APPDATA%\dev.simpu.app\`).
 
 ## Build from source
 

@@ -1,0 +1,19 @@
+{
+  "bundle": {
+    "targets": ["deb", "appimage"],
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/bin/simpu-plugin-bitwarden": "../../target/release/simpu-plugin-bitwarden",
+          "/usr/bin/simpu-plugin-keepassxc": "../../target/release/simpu-plugin-keepassxc"
+        }
+      },
+      "appimage": {
+        "files": {
+          "/usr/bin/simpu-plugin-bitwarden": "../../target/release/simpu-plugin-bitwarden",
+          "/usr/bin/simpu-plugin-keepassxc": "../../target/release/simpu-plugin-keepassxc"
+        }
+      }
+    }
+  }
+}
